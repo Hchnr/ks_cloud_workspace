@@ -1,0 +1,26 @@
+# Runtime artifacts, manifests, logs, checkpoints and historical runs
+/runs/
+/logs/
+/.archive/
+*.log
+*.pid
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+# Private configuration and environment manuals
+.env
+.env.*
+!.env.example
+*.local.json
+.ks3util.conf
+*credentials*
+*.pem
+*.key
+/docs/env/*.pdf
+.DS_Store

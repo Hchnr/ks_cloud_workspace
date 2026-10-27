@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export PYTHONPATH="$repo_dir/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m ks_cloud.cli "$@"

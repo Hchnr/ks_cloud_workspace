@@ -1,0 +1,12 @@
+{
+  "source": "/absolute/path/to/dataset",
+  "destination": "ks3://your-bucket/backups/dataset/",
+  "tool": "/absolute/path/to/ks3util",
+  "config_file": "/absolute/path/to/private/.ks3util.conf",
+  "remote_run_dir": "/var/tmp/ks-cloud/unique-run-id",
+  "hosts": ["master-0", "worker-0"],
+  "jobs": 8,
+  "parallel": 1,
+  "list_parallel": 2,
+  "exclude": []
+}

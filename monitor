@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+plan_path=${KS_CLOUD_PLAN:-"$repo_dir/runs/current/plan.json"}
+if [ ! -f "$plan_path" ]; then
+  echo "No plan found. Set KS_CLOUD_PLAN to your plan.json path." >&2
+  exit 1
+fi
+exec "$repo_dir/bin/ks-cloud" monitor --plan "$plan_path" "$@"
