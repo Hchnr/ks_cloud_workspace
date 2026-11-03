@@ -24,3 +24,8 @@ dist/
 *.key
 /docs/env/*.pdf
 .DS_Store
+.secrets/
+.swanlab/
+swanlog/
+ks3util_output/
+*.sqlite*

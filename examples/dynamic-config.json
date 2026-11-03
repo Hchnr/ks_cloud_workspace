@@ -1,0 +1,40 @@
+{
+  "run_dir": "/shared/ks-cloud/runs/my-run",
+  "local_root": "/var/tmp/ks-cloud/my-run",
+  "queue_db": "/var/tmp/ks-cloud/my-run/queue.sqlite",
+  "queue_mirror_seconds": 30,
+  "endpoint": "http://COORDINATOR_IP:18763",
+  "port": 18763,
+  "hosts": ["cpu-master-0", "cpu-worker-0"],
+  "tool": "/absolute/path/to/ks3util",
+  "config_file": "/absolute/path/to/private/.ks3util.conf",
+  "tasks": [
+    {
+      "id": "dataset",
+      "source": "/shared/dataset",
+      "destination": "ks3://your-bucket/backups/shared/dataset/"
+    }
+  ],
+  "slots": 2,
+  "jobs": 16,
+  "parallel": 2,
+  "large_file_parallel": 8,
+  "list_parallel": 1,
+  "chunk_files": 1000,
+  "chunk_bytes": 2147483648,
+  "pending_per_source": 256,
+  "lease_seconds": 240,
+  "worker_disconnect_seconds": 90,
+  "heartbeat_seconds": 15,
+  "stall_seconds": 1800,
+  "attempts": 5,
+  "minimum_worker_protocol": 2,
+  "enable_http2": true,
+  "require_start_file": true,
+  "swanlab_enabled": true,
+  "swanlab_python": "/absolute/path/to/swanlab-venv/bin/python",
+  "swanlab_project": "ks-cloud-upload",
+  "swanlab_interval": 120,
+  "swanlab_key_file": "/absolute/path/to/private/swanlab_api_key",
+  "swanlab_proxy_file": ""
+}
