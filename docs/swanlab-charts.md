@@ -6,6 +6,17 @@
 
 2026-11-03 凌晨修复前，CPU/内存来自宿主机、活动数包含遗留租约；修复后按容器配额和心跳确认统计，前后不能直接比较。
 
+## recovery
+
+| 图表 | 含义 |
+|---|---|
+| `recovery/leader_index` | 当前协调器在 hosts 列表中的索引，0 为第一台 CPU 节点；-1 表示未知。 |
+| `recovery/generation` | 协调器任期累计编号，进程重启或接管后增加；原主恢复不抢占当前主。 |
+| `recovery/leader_heartbeat_age_seconds` | 距主节点最近一次成功发布共享心跳的秒数；默认 45 秒失效后拒绝 RPC。 |
+| `recovery/guardians_alive` | 最近 90 秒有守护状态上报的远端节点数量，目标为 16。 |
+| `recovery/queue_snapshot_age_seconds` | 距最近共享队列快照的秒数；恢复可能重做快照之后的增量检查。 |
+| `recovery/claim_grace_seconds` | 从共享快照接管后的任务领取隔离窗口剩余秒数；窗口内继续接受心跳及结果，不发新任务。 |
+
 ## progress
 
 | 图表 | 含义 |

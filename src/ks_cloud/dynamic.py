@@ -17,9 +17,11 @@ import sys
 import threading
 import time
 import urllib.request
+import urllib.parse
 import uuid
 
 from .common import parse_progress, save, successful, tail, upload_command
+from .ha import Discovery, Leadership, restore_for_leadership, recovery_snapshot, locked_owner
 
 
 class Queue:
@@ -285,6 +287,8 @@ class Queue:
             if action == 'claim':
                 if (self.base / 'STOP').exists():
                     return dict(stop=True)
+                if now < self.config.get('ha_claims_after', 0):
+                    return dict(wait=True, recovering=True)
                 # Drain old clients after their current transfers finish, without killing uploads.
                 if data.get('protocol_version', 0) < self.config.get('minimum_worker_protocol', 0):
                     return dict(done=True)
@@ -360,7 +364,9 @@ class Queue:
                             and s['source'] in self.scan_activity
                             and self.scan_activity[s['source']]['operation'] != 'queue_backpressure'
                             and now-self.scan_activity[s['source']]['updated'] > self.config.get('scan_stall_seconds', 180)]
+        recovery = recovery_snapshot(self.config) if self.config.get('ha_enabled') else None
         return dict(updated=now, state=state, scan_complete=not scanning, groups=groups, scans=scans,
+                    recovery=recovery,
                     scanner_activity=dict(self.scan_activity),
                     last_completed_at=last_completed, upload_idle_seconds=now-last_completed if last_completed else None,
                     waiting_for_scan=scanning and not unfinished, stalled_scanners=stalled_scanners,
@@ -373,8 +379,14 @@ class Queue:
 def coordinator(config):
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     base = Path(config['run_dir'])
-    lock = (base / 'coordinator.lock').open('a')
+    lock = (base / 'coordinator.lock').open('a+')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    leadership = None
+    if config.get('ha_enabled'):
+        host = config['coordinator_host']
+        previous, restored = restore_for_leadership(config, host,locked_owner(lock,config))
+        leadership = Leadership(config, host, previous, restored,lock=lock)
+        config = dict(config, ha_claims_after=leadership.claims_after)
     queue = Queue(config)
     token = (base / 'token').read_text().strip()
 
@@ -383,6 +395,9 @@ def coordinator(config):
             pass
 
         def do_POST(self):
+            if leadership and not leadership.healthy():
+                self.send_error(503, 'Leadership heartbeat expired')
+                return
             if self.headers.get('Authorization') != 'Bearer ' + token:
                 self.send_error(403)
                 return
@@ -404,7 +419,10 @@ def coordinator(config):
                 print('RPC error:', type(e).__name__, str(e), flush=True)
                 self.send_error(500)
 
-    server = ThreadingHTTPServer(('0.0.0.0', config['port']), Handler)
+    port = urllib.parse.urlsplit(leadership.endpoint).port if leadership else config['port']
+    server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
+    if leadership:
+        leadership.start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     def mirror_loop():
         while True:
@@ -440,7 +458,7 @@ def coordinator(config):
         temp = base / 'DASHBOARD.md.tmp'
         temp.write_text('\n'.join(lines)+'\n')
         os.replace(temp, base / 'DASHBOARD.md')
-        time.sleep(30)
+        time.sleep(config.get('coordinator_publish_seconds',30))
 
 
 def cgroup_metrics(base=Path('/sys/fs/cgroup')):
@@ -494,17 +512,22 @@ def worker(config, host):
     shared = Path(config['run_dir'])
     token = (shared / 'token').read_text().strip()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    discovery = Discovery(config)
     active = {}
     mutex = threading.RLock()
     stop = threading.Event()
     last_contact = [time.monotonic()]
 
     def rpc(action, data):
-        data = dict(data, host=host, protocol_version=2)
-        req = urllib.request.Request(config['endpoint']+'/'+action, json.dumps(data).encode(),
+        data = dict(data, host=host, protocol_version=3 if config.get('ha_enabled') else 2)
+        req = urllib.request.Request(discovery.get()+'/'+action, json.dumps(data).encode(),
                                      {'Authorization': 'Bearer '+token, 'Content-Type': 'application/json'})
-        with opener.open(req, timeout=10) as response:
-            return json.load(response)
+        try:
+            with opener.open(req, timeout=10) as response:
+                return json.load(response)
+        except Exception:
+            discovery.get(force=True)
+            raise
 
     def terminate(child):
         if child.poll() is None:
@@ -614,6 +637,8 @@ def main():
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
     if args.mode == 'coordinator':
+        if config.get('ha_enabled'):
+            config = dict(config, coordinator_host=args.host or config['hosts'][0])
         coordinator(config)
     else:
         if args.host not in config['hosts']:

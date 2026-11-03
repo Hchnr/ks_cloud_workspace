@@ -114,6 +114,15 @@ def run(config):
                     if 'cpu_usage_seconds' in n and 'cpu_usage_seconds' in old:
                         m[prefix+'cpu_used_cores'] = max(0,n['cpu_usage_seconds']-old['cpu_usage_seconds'])/dt
             m['cluster/slot_imbalance'] = max(node_slots,default=0)-min(node_slots,default=0)
+            recovery=s.get('recovery')
+            if recovery:
+                leader=recovery['leader']
+                m['recovery/leader_index']=config['hosts'].index(leader['host']) if leader.get('host') in config['hosts'] else -1
+                m['recovery/generation']=leader.get('generation',0)
+                m['recovery/leader_heartbeat_age_seconds']=max(0,now-leader.get('updated',now))
+                m['recovery/guardians_alive']=sum(g['alive'] for g in recovery['guardians'].values())
+                m['recovery/queue_snapshot_age_seconds']=recovery['snapshot_age_seconds']
+                m['recovery/claim_grace_seconds']=max(0,leader.get('claims_after',0)-now)
             if previous:
                 dt = max(1,s['updated']-previous['updated'])
                 m['throughput/completed_files_s'] = max(0,s['completed_files']-previous['completed_files'])/dt

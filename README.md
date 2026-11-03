@@ -10,6 +10,7 @@
 | --- | --- |
 | 多节点动态均衡上传 | [动态部署、监控与恢复](docs/dynamic-upload.md)，[配置模板](examples/dynamic-config.json) |
 | 查看当前动态运行 | `./monitor --once`；显式入口 `./bin/ks-cloud monitor-dynamic --run-dir /absolute/run --once` |
+| 控制容器断开、主节点失联后的自动恢复 | [远端守护、备用接管与防双主](docs/automatic-recovery.md)，[HA 配置模板](examples/ha-config.json) |
 | 理解 SwanLab 图表 | [全部指标及统计口径](docs/swanlab-charts.md) |
 | 预先生成固定分片计划 | 下方流程，[配置模板](examples/config.json)，[恢复说明](docs/operations.md) |
 | 单节点批量恢复、磁盘与 KS3 诊断 | [辅助工具](docs/tools.md) |

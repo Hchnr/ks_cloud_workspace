@@ -4,6 +4,14 @@ from html import escape
 
 
 GUIDE = {
+    'recovery': [
+        ('leader_index','当前协调器在 hosts 列表中的索引，0 为第一台 CPU 节点；-1 表示未知。'),
+        ('generation','协调器任期累计编号，进程重启或接管后增加；原主恢复不抢占当前主。'),
+        ('leader_heartbeat_age_seconds','距主节点最近一次成功发布共享心跳的秒数；默认 45 秒失效后拒绝 RPC。'),
+        ('guardians_alive','最近 90 秒有守护状态上报的远端节点数量，目标为 16。'),
+        ('queue_snapshot_age_seconds','距最近共享队列快照的秒数；恢复可能重做快照之后的增量检查。'),
+        ('claim_grace_seconds','从共享快照接管后的任务领取隔离窗口剩余秒数；窗口内继续接受心跳及结果，不发新任务。'),
+    ],
     'progress': [
         ('completed_files', '完整成功分片中的已处理文件数，包含实际上传和增量跳过。'),
         ('completed_TiB', '已处理文件对应的数据量（TiB），包含跳过，不是网络上传量。'),
@@ -170,6 +178,9 @@ def render_overview(report):
     ts = datetime.fromtimestamp(report['updated'],timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S 北京时间')
     basis = '本轮扫描总量' if report['exact'] else '历史清点参考总量（估算）'
     body = f'<h1>16 节点上传 · 总进度看板</h1><p class="muted">快照：{ts} · 状态：{escape(report["state"])} · 约每 120 秒上传一份新快照，请查看最新 step。</p>'
+    if s.get('recovery'):
+        recovery=s['recovery'];leader=recovery['leader']
+        body += '<p>远端协调器：'+escape(leader.get('host','未知'))+f' · 任期 {leader.get("generation",0)} · 守护在线 {sum(g["alive"] for g in recovery["guardians"].values())}/{len(recovery["guardians"])}</p>'
     if not report['exact']:
         body += '<div class="notice">全量扫描尚未结束。以下总覆盖率使用历史清点参考量，不是精确完成率；已发现范围接近 100% 不代表全部数据已处理。各目录扫描完成后，其分母自动采用本轮实际扫描总量。</div>'
     if m['overview/snapshot_age_seconds'] > 180:
