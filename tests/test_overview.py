@@ -34,6 +34,14 @@ class OverviewTests(unittest.TestCase):
         self.assertNotIn('overview/coverage_bytes_pct',r['metrics'])
         self.assertIn('总量待确定',render_overview(r))
 
+    def test_delayed_snapshot_is_explicitly_last_known_status(self):
+        report = build_overview(self.s, self.config, self.ref, now=220)
+        self.assertEqual(report['metrics']['overview/snapshot_stale'], 1)
+        html = render_overview(report)
+        self.assertIn('120 秒未刷新', html)
+        self.assertIn('最后已知状态', html)
+        self.assertIn('不能据此判断', html)
+
     def test_completed_scan_replaces_old_reference_and_exclusions_prevent_clean_success(self):
         self.s['scans'][0].update(state='done',error='1 excluded entry')
         self.s['state'] = 'finished_with_issues'

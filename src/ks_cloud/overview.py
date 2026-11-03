@@ -79,11 +79,20 @@ GUIDE = {
         ('failed_chunks', '最终失败的分片数。'),
         ('oom_kill_events', '所有节点容器 OOM Kill 累计计数之和；容器重建会影响连续性。'),
         ('snapshot_age_seconds', '看板生成时间距任务快照的秒数；过大说明监控数据可能陈旧。'),
+        ('snapshot_stale', '1 表示快照已过期（默认超过 90 秒）；运行中暂停上报旧的进度、吞吐和节点数值，仅保留新鲜度与带警告的看板。'),
         ('all_sources_successful', '仅完整无异常结束时为 1；未结束或存在失败/排除项时为 0。'),
         ('dashboard', '总进度 HTML 看板：参考/确切进度、实际上传量、各目录、节点负载和异常。'),
         ('metric_guide', '所有图表的逐项说明；节点同名指标共享定义，适用于全部 16 个节点。'),
     ],
 }
+
+
+def snapshot_freshness(snapshot, config, now):
+    age = max(0, now-snapshot['updated'])
+    limit = max(1, config.get('snapshot_stale_after_seconds',
+                             max(90, 3*config.get('coordinator_publish_seconds', 30))))
+    return {'overview/snapshot_age_seconds': age,
+            'overview/snapshot_stale': int(age > limit)}
 
 
 def guide_markdown():
@@ -135,7 +144,7 @@ def build_overview(snapshot, config, inventory=None, now=None):
         'overview/active_slots': len(snapshot['active']),
         'overview/failed_chunks': sum(r['failed'] for r in rows),
         'overview/oom_kill_events': sum(n.get('oom_kill_events',0) for n in snapshot['nodes'].values()),
-        'overview/snapshot_age_seconds': max(0,now-snapshot['updated']),
+        **snapshot_freshness(snapshot, config, now),
         'overview/all_sources_successful': int(snapshot['state']=='finished' and exact and not any(r['error'] or r['failed'] for r in rows)),
     }
     if available:
@@ -183,8 +192,8 @@ def render_overview(report):
         body += '<p>远端协调器：'+escape(leader.get('host','未知'))+f' · 任期 {leader.get("generation",0)} · 守护在线 {sum(g["alive"] for g in recovery["guardians"].values())}/{len(recovery["guardians"])}</p>'
     if not report['exact']:
         body += '<div class="notice">全量扫描尚未结束。以下总覆盖率使用历史清点参考量，不是精确完成率；已发现范围接近 100% 不代表全部数据已处理。各目录扫描完成后，其分母自动采用本轮实际扫描总量。</div>'
-    if m['overview/snapshot_age_seconds'] > 180:
-        body += '<div class="notice">当前任务快照超过 180 秒未刷新，以下数据可能陈旧。</div>'
+    if m['overview/snapshot_stale']:
+        body += f'<div class="notice">当前任务快照已过期（{m["overview/snapshot_age_seconds"]:.0f} 秒未刷新）。以下为最后已知状态，不能据此判断当前上传速度或节点是否在线。</div>'
     if m['overview/waiting_for_scan']:
         body += f'<div class="notice">上传队列为空，正在等待扫描器提供新任务；距最后完成分片已 {m["overview/upload_idle_minutes"]:.1f} 分钟。节点在线不代表上传仍在推进。</div>'
     if m['overview/stalled_scanners']:

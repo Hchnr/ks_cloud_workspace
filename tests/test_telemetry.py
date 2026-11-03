@@ -6,7 +6,32 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from ks_cloud.telemetry import configure_connection
+from ks_cloud.telemetry import configure_connection, metrics_for_snapshot
+
+
+class SnapshotFreshnessTests(unittest.TestCase):
+    def test_stale_running_snapshot_does_not_publish_old_health_progress_or_rates(self):
+        metrics = {'cluster/healthy_nodes': 16, 'nodes/n/healthy': 1,
+                   'progress/completed_files': 42, 'throughput/completed_files_s': 0,
+                   'overview/completed_TiB': 1, 'overview/dashboard': 'last-known HTML'}
+        stale = metrics_for_snapshot(dict(updated=100, state='running'), {}, metrics, now=220)
+        self.assertEqual(set(stale), {'overview/dashboard', 'overview/snapshot_age_seconds',
+                                      'overview/snapshot_stale'})
+        self.assertEqual(stale['overview/snapshot_stale'], 1)
+        self.assertEqual(stale['overview/snapshot_age_seconds'], 120)
+        fresh = metrics_for_snapshot(dict(updated=210, state='running'), {}, metrics, now=220)
+        self.assertEqual(fresh['cluster/healthy_nodes'], 16)
+        self.assertEqual(fresh['progress/completed_files'], 42)
+        self.assertEqual(fresh['overview/snapshot_stale'], 0)
+
+    def test_expiry_is_configurable_and_terminal_results_remain_reportable(self):
+        snapshot = dict(updated=100, state='running')
+        self.assertEqual(metrics_for_snapshot(snapshot, {'snapshot_stale_after_seconds': 150},
+                                             {}, now=220)['overview/snapshot_stale'], 0)
+        snapshot['state'] = 'finished_with_issues'
+        metrics = metrics_for_snapshot(snapshot, {}, {'progress/completed_files': 42}, now=220)
+        self.assertEqual(metrics['progress/completed_files'], 42)
+        self.assertEqual(metrics['overview/snapshot_stale'], 1)
 
 
 class ConnectionTests(unittest.TestCase):

@@ -7,7 +7,17 @@ from pathlib import Path
 import time
 
 from .common import save
-from .overview import build_overview, render_guide, render_overview
+from .overview import build_overview, render_guide, render_overview, snapshot_freshness
+
+
+def metrics_for_snapshot(snapshot, config, metrics, now):
+    freshness = snapshot_freshness(snapshot, config, now)
+    if freshness['overview/snapshot_stale'] and not snapshot['state'].startswith('finished'):
+        # Do not timestamp old health/progress as a fresh observation. HTML keeps
+        # the last known values, with the same explicit stale-snapshot warning.
+        metrics = {key: metrics[key] for key in ['overview/dashboard', 'overview/metric_guide']
+                   if key in metrics}
+    return dict(metrics, **freshness)
 
 
 def configure_connection(config):
@@ -144,11 +154,15 @@ def run(config):
             except Exception as e:
                 # A presentation failure must not prevent scalar monitoring.
                 state['overview_error'] = type(e).__name__+': '+str(e)
+            m = metrics_for_snapshot(s, config, m, now)
             swanlab.log(m, step=step)
             if 'overview/dashboard' in m:
                 state['overview_last_enqueued'] = now
                 state['overview_last_step'] = step
-            state.update(last_step=step, last_enqueued=now, metrics_count=len(m), errors=0)
+            state.update(last_step=step, last_enqueued=now, metrics_count=len(m), errors=0,
+                         snapshot_updated=s['updated'],
+                         snapshot_age_seconds=m['overview/snapshot_age_seconds'],
+                         snapshot_stale=bool(m['overview/snapshot_stale']))
             errors = 0
             previous = s
             # Infrequent readback distinguishes SDK enqueue from confirmed cloud ingestion.
