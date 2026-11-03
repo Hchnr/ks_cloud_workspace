@@ -151,8 +151,54 @@ def recovery_snapshot(config):
     guardians = {}
     for host in config['hosts']:
         state = read_json(base/'recovery'/(host+'.json'), {})
-        guardians[host] = dict(alive=time.time()-state.get('updated', 0) < 90,
+        guardians[host] = dict(updated=state.get('updated', 0),
+                              alive=time.time()-state.get('updated', 0) < 90,
                               restarts=state.get('supervisor_starts', 0))
     mirror = read_json(base/'queue_mirror.json', {})
     return dict(leader=leader, guardians=guardians,
                 snapshot_age_seconds=max(0,time.time()-mirror.get('updated',time.time())))
+
+
+class RecoveryMonitor:
+    """Keep optional shared-filesystem diagnostics off the progress publication path.
+
+    Only one collector can be in flight, even if an NFS read blocks indefinitely.
+    Expired samples are omitted rather than presenting cached guardians as online.
+    This cache is diagnostic only; leadership fencing always uses live state.
+    """
+    def __init__(self, config):
+        self.config = config
+        self.mutex = threading.Lock()
+        self.collecting = False
+        self.sample = None
+        self.started = None
+
+    def _collect(self):
+        started = time.time()
+        try:
+            sample = recovery_snapshot(self.config)
+            # Timestamp the start: sequential reads may themselves take a long time.
+            with self.mutex:
+                self.sample = (started, sample)
+        except Exception as error:
+            print('recovery diagnostics:', type(error).__name__, flush=True)
+        finally:
+            with self.mutex:
+                self.collecting = False
+
+    def get(self):
+        now = time.time()
+        with self.mutex:
+            age = now-self.sample[0] if self.sample else None
+            if not self.collecting and (self.started is None or
+                    now-self.started >= self.config.get('recovery_monitor_seconds', 30)):
+                self.collecting = True
+                self.started = now
+                threading.Thread(target=self._collect, daemon=True).start()
+            stale = age is None or age > self.config.get('recovery_monitor_stale_seconds', 90)
+            sample = dict(self.sample[1]) if self.sample and not stale else None
+            if sample:
+                sample['snapshot_age_seconds'] += age
+                sample['guardians'] = {host: dict(g, alive=now-g.get('updated',0)<90)
+                                       for host,g in sample['guardians'].items()}
+            return sample, age, stale

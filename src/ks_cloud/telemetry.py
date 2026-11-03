@@ -124,6 +124,10 @@ def run(config):
                     if 'cpu_usage_seconds' in n and 'cpu_usage_seconds' in old:
                         m[prefix+'cpu_used_cores'] = max(0,n['cpu_usage_seconds']-old['cpu_usage_seconds'])/dt
             m['cluster/slot_imbalance'] = max(node_slots,default=0)-min(node_slots,default=0)
+            if config.get('ha_enabled'):
+                m['recovery/status_stale']=int(s.get('recovery_status_stale',False))
+                if s.get('recovery_status_age_seconds') is not None:
+                    m['recovery/status_age_seconds']=s['recovery_status_age_seconds']+max(0,now-s['updated'])
             recovery=s.get('recovery')
             if recovery:
                 leader=recovery['leader']

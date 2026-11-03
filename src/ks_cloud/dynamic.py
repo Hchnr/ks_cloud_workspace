@@ -21,7 +21,7 @@ import urllib.parse
 import uuid
 
 from .common import parse_progress, save, successful, tail, upload_command
-from .ha import Discovery, Leadership, restore_for_leadership, recovery_snapshot, locked_owner
+from .ha import Discovery, Leadership, restore_for_leadership, RecoveryMonitor, locked_owner
 
 
 class Queue:
@@ -68,6 +68,7 @@ class Queue:
         self.sources = {t['id']: t for t in config['tasks']}
         self.scan_activity = {}
         self.cursor = 0
+        self.recovery_monitor = RecoveryMonitor(config) if config.get('ha_enabled') else None
 
     def mirror(self):
         """Take a local consistent snapshot; shared disk writes never hold the RPC lock."""
@@ -364,9 +365,11 @@ class Queue:
                             and s['source'] in self.scan_activity
                             and self.scan_activity[s['source']]['operation'] != 'queue_backpressure'
                             and now-self.scan_activity[s['source']]['updated'] > self.config.get('scan_stall_seconds', 180)]
-        recovery = recovery_snapshot(self.config) if self.config.get('ha_enabled') else None
+        recovery, recovery_age, recovery_stale = (self.recovery_monitor.get() if self.recovery_monitor
+                                                   else (None, None, False))
         return dict(updated=now, state=state, scan_complete=not scanning, groups=groups, scans=scans,
-                    recovery=recovery,
+                    recovery=recovery, recovery_status_age_seconds=recovery_age,
+                    recovery_status_stale=recovery_stale,
                     scanner_activity=dict(self.scan_activity),
                     last_completed_at=last_completed, upload_idle_seconds=now-last_completed if last_completed else None,
                     waiting_for_scan=scanning and not unfinished, stalled_scanners=stalled_scanners,

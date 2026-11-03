@@ -7,12 +7,14 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+from unittest.mock import patch
 import time
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from ks_cloud.common import save
-from ks_cloud.ha import Discovery, Leadership, restore_for_leadership, locked_owner
+from ks_cloud.ha import Discovery, Leadership, restore_for_leadership, locked_owner, RecoveryMonitor
 
 
 class RecoveryTests(unittest.TestCase):
@@ -22,6 +24,55 @@ class RecoveryTests(unittest.TestCase):
         self.config=dict(run_dir=str(self.root),queue_db=str(self.root/'local'/'queue.sqlite'),
                          endpoint='http://127.0.0.1:1',hosts=['a','b'],ha_enabled=True,
                          coordinator_endpoints={'a':'http://127.0.0.1:1','b':'http://127.0.0.1:2'})
+
+    def test_blocked_recovery_read_does_not_block_progress_or_spawn_more_collectors(self):
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+        def blocked(config):
+            entered.set()
+            release.wait(5)
+            completed.set()
+            return dict(leader={}, guardians={}, snapshot_age_seconds=2)
+        monitor = RecoveryMonitor(self.config)
+        with patch('ks_cloud.ha.recovery_snapshot', side_effect=blocked) as collect:
+            try:
+                self.assertEqual(monitor.get(), (None, None, True))
+                self.assertTrue(entered.wait(1))
+                for _ in range(20):
+                    self.assertEqual(monitor.get(), (None, None, True))
+                self.assertEqual(collect.call_count, 1)
+                release.set()
+                self.assertTrue(completed.wait(1))
+                deadline = time.monotonic()+1
+                while monitor.collecting and time.monotonic()<deadline:
+                    time.sleep(.001)
+                sample, age, stale = monitor.get()
+                self.assertFalse(stale)
+                self.assertGreaterEqual(sample['snapshot_age_seconds'], 2)
+                self.assertIsNotNone(age)
+                with monitor.mutex:
+                    monitor.sample = (time.time()-100, sample)
+                sample, age, stale = monitor.get()
+                self.assertIsNone(sample)
+                self.assertTrue(stale)
+                self.assertGreater(age, 90)
+            finally:
+                release.set()
+
+    def test_cached_guardian_health_expires_and_mirror_age_advances(self):
+        monitor = RecoveryMonitor(self.config)
+        now = time.time()
+        monitor.started = now
+        monitor.sample = (now-20, dict(leader={}, snapshot_age_seconds=5,
+                          guardians={'a':dict(updated=now-95,alive=True),
+                                     'b':dict(updated=now-30,alive=True)}))
+        sample, age, stale = monitor.get()
+        self.assertFalse(stale)
+        self.assertFalse(sample['guardians']['a']['alive'])
+        self.assertTrue(sample['guardians']['b']['alive'])
+        self.assertGreaterEqual(sample['snapshot_age_seconds'], 25)
+        self.assertTrue(monitor.sample[1]['guardians']['a']['alive'])
 
     def tearDown(self):
         self.tmp.cleanup()

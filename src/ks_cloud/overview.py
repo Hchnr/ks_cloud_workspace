@@ -5,6 +5,8 @@ from html import escape
 
 GUIDE = {
     'recovery': [
+        ('status_stale','恢复状态后台采集尚无数据或超过 90 秒未刷新时为 1；此时不报告旧的守护在线数。'),
+        ('status_age_seconds','恢复状态后台采样开始至今的秒数；辅助采集阻塞不会阻止上传进度更新。'),
         ('leader_index','当前协调器在 hosts 列表中的索引，0 为第一台 CPU 节点；-1 表示未知。'),
         ('generation','协调器任期累计编号，进程重启或接管后增加；原主恢复不抢占当前主。'),
         ('leader_heartbeat_age_seconds','距主节点最近一次成功发布共享心跳的秒数；默认 45 秒失效后拒绝 RPC。'),
@@ -187,6 +189,8 @@ def render_overview(report):
     ts = datetime.fromtimestamp(report['updated'],timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S 北京时间')
     basis = '本轮扫描总量' if report['exact'] else '历史清点参考总量（估算）'
     body = f'<h1>16 节点上传 · 总进度看板</h1><p class="muted">快照：{ts} · 状态：{escape(report["state"])} · 约每 120 秒上传一份新快照，请查看最新 step。</p>'
+    if s.get('recovery_status_stale'):
+        body += '<p>恢复状态采集尚未完成或已过期；守护在线数暂不可用，上传进度仍独立更新。</p>'
     if s.get('recovery'):
         recovery=s['recovery'];leader=recovery['leader']
         body += '<p>远端协调器：'+escape(leader.get('host','未知'))+f' · 任期 {leader.get("generation",0)} · 守护在线 {sum(g["alive"] for g in recovery["guardians"].values())}/{len(recovery["guardians"])}</p>'
