@@ -66,6 +66,8 @@ SwanLab 新增 `00-总进度` 分组（指标前缀 `overview/`）：`dashboard`
 
 总览 HTML 每 120 秒更新一份快照，请在媒体图表中查看最新 step；图表说明在旁路启动后上传一次。指标说明也保存在 [swanlab-charts.md](swanlab-charts.md)，运行目录保留最新 `overview.html` 和 `metric_guide.html`。HTML 展示失败不阻断原标量监控。新增看板只需更新旁路，不需要重启上传 worker 或协调器。
 
+总进度曲线使用默认 Step 横轴。2026-11-03 修复了显式 `_relative_time` 被云端创建为错误横轴类型、导致网页整组“暂无数据”的问题；历史指标一直存在，已原位修正已有 18 张曲线的显示配置。总进度组置于默认视图首位，前六张依次为数据覆盖率、完成量、剩余量、文件覆盖率、实际上传量和跳过量。云端 summary 有最新值只能证明数据入库，不能证明网页图表可用；验证需同时检查图表横轴与网页取数接口。已有图表不能靠重新调用 `define_metric` 修改，须更新原图表显示配置，保留历史数据。
+
 容器实际限额是每节点 4 核、16 GiB。2026-11-03 起，资源图表改读 cgroup v2：`cpus` 是 CPU 配额，`memory_limit_GiB` 是容器内存上限，`memory_current_GiB` 包含文件缓存，`memory_anon_GiB` 是匿名内存，`memory_file_cache_GiB` 是文件缓存。`memory_used_pct` 现在表示匿名内存占容器上限的比例，旧数据使用宿主机口径，两段曲线不能直接比较。`oom_events`、`oom_kill_events` 是容器生命周期累计计数；`cpu_used_cores` 由容器 CPU 时间差分计算。`load1` 仍是宿主机负载，不能按 4 核容器负载解读。活动槽位按 worker 最近心跳确认的任务统计，未确认或等待回收的租约仅计入 `cluster/leased_chunks`。
 
 ## 进程与恢复

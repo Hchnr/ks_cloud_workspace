@@ -62,9 +62,10 @@ def run(config):
     save(state_file, state)
     inventory_path = config.get('overview_inventory_file')
     inventory = json.loads(Path(inventory_path).read_text()) if inventory_path else {}
-    # A dedicated group keeps the overall dashboard separate from per-node diagnostics.
+    # Keep the default Step axis. The current cloud creates an invalid frontend
+    # axis descriptor for explicit _relative_time definitions (blank charts).
     if hasattr(run, 'define_metric'):
-        run.define_metric('overview/*', section_name='00-总进度', x_axis='_relative_time')
+        run.define_metric('overview/*', section_name='00-总进度')
     interval = max(120, config.get('swanlab_interval', 120))
     time.sleep(max(0, state.get('last_enqueued', 0)+interval-time.time()))
     previous = None
