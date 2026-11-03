@@ -51,6 +51,9 @@ GUIDE = {
         ('network_rx_MiB_s', '节点网络命名空间平均接收速度（MiB/s），包含其他任务流量。'),
     ],
     'overview': [
+        ('waiting_for_scan', '1 表示已生成任务均已处理，上传节点正在等待扫描器提供新任务；节点在线不代表上传仍在推进。'),
+        ('upload_idle_minutes', '距最近一个成功分片完成的分钟数；初始尚无成功分片时为 0，需结合 waiting_for_scan 和扫描状态。'),
+        ('stalled_scanners', '当前扫描操作超过 180 秒没有更新的扫描器数量，不含正常的队列预取等待。'),
         ('coverage_bytes_pct', '全量数据量覆盖率；扫描中使用历史清点参考总量（估算），扫描全部成功结束后用本轮扫描总量。'),
         ('coverage_files_pct', '全量文件数覆盖率；分母规则同上。文件数与字节数百分比可能差别很大。'),
         ('total_is_exact', '1 表示所有数据源扫描结束、总量来自本轮清单（排除项另列）；0 表示分母仍为参考值或未知。'),
@@ -110,6 +113,9 @@ def build_overview(snapshot, config, inventory=None, now=None):
     total = {k:sum(r['total'][k] for r in rows) for k in ['files','bytes']} if available else None
     counters = snapshot['counters']
     metrics = {
+        'overview/waiting_for_scan': int(snapshot.get('waiting_for_scan', False)),
+        'overview/upload_idle_minutes': (snapshot.get('upload_idle_seconds') or 0)/60,
+        'overview/stalled_scanners': len(snapshot.get('stalled_scanners', [])),
         'overview/total_is_exact': int(exact),
         'overview/completed_TiB': snapshot['completed_bytes']/1024**4,
         'overview/completed_files': snapshot['completed_files'],
@@ -168,6 +174,10 @@ def render_overview(report):
         body += '<div class="notice">全量扫描尚未结束。以下总覆盖率使用历史清点参考量，不是精确完成率；已发现范围接近 100% 不代表全部数据已处理。各目录扫描完成后，其分母自动采用本轮实际扫描总量。</div>'
     if m['overview/snapshot_age_seconds'] > 180:
         body += '<div class="notice">当前任务快照超过 180 秒未刷新，以下数据可能陈旧。</div>'
+    if m['overview/waiting_for_scan']:
+        body += f'<div class="notice">上传队列为空，正在等待扫描器提供新任务；距最后完成分片已 {m["overview/upload_idle_minutes"]:.1f} 分钟。节点在线不代表上传仍在推进。</div>'
+    if m['overview/stalled_scanners']:
+        body += '<div class="notice">扫描操作超过阈值未更新：'+escape(', '.join(s['stalled_scanners']))+'。请检查下方扫描器当前位置及共享盘。</div>'
     def card(label,value,description=''):
         return f'<div class="card"><div class="label">{escape(label)}</div><div class="value">{escape(str(value))}</div><div class="muted">{escape(description)}</div></div>'
     pct = m.get('overview/coverage_bytes_pct')

@@ -68,6 +68,9 @@
 
 | 图表 | 含义 |
 |---|---|
+| `overview/waiting_for_scan` | 1 表示已生成任务均已处理，上传节点正在等待扫描器提供新任务；节点在线不代表上传仍在推进。 |
+| `overview/upload_idle_minutes` | 距最近一个成功分片完成的分钟数；初始尚无成功分片时为 0，需结合 waiting_for_scan 和扫描状态。 |
+| `overview/stalled_scanners` | 当前扫描操作超过 180 秒没有更新的扫描器数量，不含正常的队列预取等待。 |
 | `overview/coverage_bytes_pct` | 全量数据量覆盖率；扫描中使用历史清点参考总量（估算），扫描全部成功结束后用本轮扫描总量。 |
 | `overview/coverage_files_pct` | 全量文件数覆盖率；分母规则同上。文件数与字节数百分比可能差别很大。 |
 | `overview/total_is_exact` | 1 表示所有数据源扫描结束、总量来自本轮清单（排除项另列）；0 表示分母仍为参考值或未知。 |
