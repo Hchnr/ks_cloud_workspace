@@ -195,8 +195,13 @@ def monitor(args):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'monitor-dynamic':
+        from .monitoring import main as monitor_dynamic
+        monitor_dynamic(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    commands.add_parser('monitor-dynamic', help='Read a dynamic run snapshot; see monitor-dynamic --help')
     p = commands.add_parser('prepare', help='Create manifests and a static assignment; no uploads')
     p.add_argument('--config', required=True)
     p.add_argument('--output', required=True)

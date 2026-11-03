@@ -69,4 +69,6 @@ def upload_command(config, manifest, folder):
         args += [flag, str(path)]
     for pattern in config.get('exclude', []):
         args += ['--exclude', pattern]
+    if config.get('enable_http2'):
+        args.append('--enable-http2')
     return args

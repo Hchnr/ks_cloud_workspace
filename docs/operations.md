@@ -1,5 +1,7 @@
 # 运行与恢复
 
+本文适用于 `prepare` / `launch` 创建的固定分片计划。动态任务池的共享队列、节点监督和恢复方式见 [dynamic-upload.md](dynamic-upload.md)。
+
 ## 停止和续跑
 
 每节点本地 `remote_run_dir` 下创建 `STOP` 文件可停止该节点当前任务，最多约30秒识别。也可对 `status.json` 中 worker PID 发送 `SIGTERM`。不要只杀上传子进程后让调度器继续执行。
@@ -20,4 +22,4 @@
 
 `runs/backup_20261023_raw/` 和日志保留原样，不纳入 Git。早期共享队列发生过重复领取及共享盘写入失败，原 `distributed/control.py` 已损坏为空文件，不能作为恢复入口。新的固定归属执行器位于 `src/ks_cloud/`。
 
-整理仓库没有重新启动上传或修改历史任务结果。当前复查状态通过本地 `runs/current/plan.json` 适配读取，默认入口 `./monitor`；克隆仓库后不包含这些运行数据，需自行生成计划。
+历史复查状态通过本地 `runs/current/plan.json` 适配读取。`./monitor` 优先选择 `runs/active.json` 中的动态运行；可用 `KS_CLOUD_PLAN=/absolute/path/to/plan.json ./monitor --once` 显式读取固定分片计划。克隆仓库不包含运行数据，需自行生成计划。

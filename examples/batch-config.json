@@ -1,0 +1,18 @@
+{
+  "workspace": "/shared/ks-cloud/runs/batch-run",
+  "local_state_dir": "/var/tmp/ks-cloud/batch-run",
+  "local_log_dir": "/var/tmp/ks-cloud/batch-run/logs",
+  "tool": "/absolute/path/to/ks3util",
+  "config_file": "/absolute/path/to/private/.ks3util.conf",
+  "jobs": 8,
+  "parallel": 2,
+  "list_parallel": 1,
+  "max_active": 1,
+  "tasks": [
+    {
+      "id": "dataset",
+      "source": "/shared/dataset",
+      "destination": "ks3://your-bucket/backups/shared/dataset/"
+    }
+  ]
+}
