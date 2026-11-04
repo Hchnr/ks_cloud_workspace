@@ -20,6 +20,20 @@ def metrics_for_snapshot(snapshot, config, metrics, now):
     return dict(metrics, **freshness)
 
 
+def scan_metrics(snapshot):
+    control = snapshot.get('scan_control')
+    if not control:
+        return {}
+    result = {'scanning/control_revision':control['revision'],
+              'scanning/enabled':int(control['enabled']),
+              'scanning/config_stale':int(control['config_stale']),
+              'scanning/config_age_seconds':control['config_age_seconds']}
+    for source, values in control['sources'].items():
+        for key in ['workers','files_s','upload_files_s','metadata_ms','operations','errors','fallbacks','cooldown_seconds']:
+            result['scanning/'+source+'/'+key] = values[key]
+    return result
+
+
 def configure_connection(config):
     """Load private connection settings without placing credentials in run config."""
     legacy = Path('/share-mixed/project/eai_pwm/.secrets')
@@ -104,6 +118,7 @@ def run(config):
                    'cluster/pending_chunks': sum(g['chunks'] for g in s['groups'] if g['state']=='pending'),
                    'cluster/scan_errors_or_exclusions': sum(bool(x['error']) for x in s['scans']),
                    'cluster/terminal': int(s['state'].startswith('finished'))})
+            m.update(scan_metrics(s))
             completed = {n['owner']: n for n in s['completed_by_node']}
             node_slots = []
             for host, n in s['nodes'].items():

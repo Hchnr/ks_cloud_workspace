@@ -4,6 +4,22 @@ from html import escape
 
 
 GUIDE = {
+    'scanning': [
+        ('control_revision', '本次协调器启动后有效热配置变更次数；重启归零，不是实验总步数。'),
+        ('enabled', '并行元数据预取开关；0 为串行扫描，上传 worker 继续工作。'),
+        ('config_stale', '热配置无效、不可读或超过有效期时为 1；自动退回串行。'),
+        ('config_age_seconds', '距最近一次完成热配置读取的秒数；独立读取线程不阻塞上传调度。'),
+    ],
+    'scanning/<数据源>': [
+        ('workers', '该源当前允许的元数据预取窗口，1 为串行；全局最多 8 个元数据线程。'),
+        ('files_s', '最近控制周期内扫描识别的文件数/秒；不代表云端已完成上传。'),
+        ('upload_files_s', '最近控制周期内该源完整成功分片的文件数/秒，含增量跳过。'),
+        ('metadata_ms', '元数据操作平均耗时（毫秒）；目录与排除项也计入。'),
+        ('operations', '本次协调器启动后累计检查的目录项数；重启归零。'),
+        ('errors', '本次检查中需排除的目录项累计数；具体原因见排除审计文件。'),
+        ('fallbacks', '本次启动后从并行降回串行的保护次数；队列满正常减速不计入。'),
+        ('cooldown_seconds', '保护回退后剩余冷却秒数；冷却期间不自动提高并发。'),
+    ],
     'recovery': [
         ('status_stale','恢复状态后台采集尚无数据或超过 90 秒未刷新时为 1；此时不报告旧的守护在线数。'),
         ('status_age_seconds','恢复状态后台采样开始至今的秒数；辅助采集阻塞不会阻止上传进度更新。'),
@@ -235,5 +251,14 @@ def render_overview(report):
         values=[host,f'{"在线" if n["healthy"] else "心跳过期"} / {n.get("active_slots",0)}',
                 f'{n.get("memory_anon_GiB",0):.2f} / {n.get("memory_limit_GiB",0):.0f}',f'{n.get("memory_file_cache_GiB",0):.2f}',n.get('oom_kill_events',0)]
         body += '<tr>'+''.join(f'<td>{escape(str(value))}</td>' for value in values)+'</tr>'
-    body += '</table><details><summary>如何读总进度</summary><p>覆盖率衡量已检查和补传的范围，包含跳过；实际上传量只统计本轮补传。历史总量不是当前文件系统快照，数据变化会影响估算。扫描结束不等于无异常完成，需查看最终失败和排除项。</p><p>每张原始图表的完整定义见同一 overview 分组下的 metric_guide。</p></details>'
+    body += '</table>'
+    control = s.get('scan_control')
+    if control:
+        body += '<h2>扫描在线控制</h2><p>配置版本 '+str(control['revision'])+'；'+('并行已启用' if control['enabled'] else '串行')+'；'+('配置不可用，保护回退' if control['config_stale'] else '配置读取正常')+'</p>'
+        body += '<table><tr><th>数据源</th><th>元数据窗口</th><th>扫描文件/s</th><th>完成文件/s</th><th>平均元数据 ms</th><th>状态 / 冷却秒数</th></tr>'
+        for name, v in sorted(control['sources'].items()):
+            values = [name,v['workers'],f'{v["files_s"]:.1f}',f'{v["upload_files_s"]:.1f}',f'{v["metadata_ms"]:.1f}',f'{v["reason"]} / {v["cooldown_seconds"]:.0f}']
+            body += '<tr>'+''.join(f'<td>{escape(str(value))}</td>' for value in values)+'</tr>'
+        body += '</table>'
+    body += '<details><summary>如何读总进度</summary><p>覆盖率衡量已检查和补传的范围，包含跳过；实际上传量只统计本轮补传。历史总量不是当前文件系统快照，数据变化会影响估算。扫描结束不等于无异常完成，需查看最终失败和排除项。</p><p>每张原始图表的完整定义见同一 overview 分组下的 metric_guide。</p></details>'
     return document('16 节点上传总进度',body)

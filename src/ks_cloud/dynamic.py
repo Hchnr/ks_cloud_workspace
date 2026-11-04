@@ -21,6 +21,7 @@ import urllib.parse
 import uuid
 
 from .common import parse_progress, save, successful, tail, upload_command
+from .scan_control import ScanControl
 from .ha import Discovery, Leadership, restore_for_leadership, RecoveryMonitor, locked_owner
 
 
@@ -68,6 +69,7 @@ class Queue:
         self.sources = {t['id']: t for t in config['tasks']}
         self.scan_activity = {}
         self.cursor = 0
+        self.scan_control = ScanControl(config)
         self.recovery_monitor = RecoveryMonitor(config) if config.get('ha_enabled') else None
 
     def mirror(self):
@@ -172,7 +174,7 @@ class Queue:
                     tid = source + '-' + hashlib.sha256((content + repr(sizes)).encode()).hexdigest()[:32]
                     with self.mutex:
                         exists = self.db.execute('SELECT 1 FROM tasks WHERE id=?', (tid,)).fetchone()
-                    while not exists and self.pending(source) >= self.config.get('pending_per_source', 256):
+                    while not exists and self.pending(source) >= self.scan_control.queue_limit(self.config.get('pending_per_source', 256)):
                         activity('queue_backpressure', paths[-1])
                         if (self.base / 'STOP').exists():
                             raise InterruptedError('STOP requested')
@@ -219,43 +221,25 @@ class Queue:
                                      (root == task['source'] and entry.name == task.get('exclude_child')))
                         continue
                     dirs = []
-                    for entry in entries:
+                    candidates = (e for e in entries if not
+                                  (root == task['source'] and e.name == task.get('exclude_child')))
+                    skip_before = resume_name if relative_root == resume_directory else None
+                    activity('metadata_wait', root)
+                    for entry, (kind, value) in self.scan_control.entries(source, candidates, skip_before):
                         activity('classify_entry', entry.path)
-                        if root == task['source'] and entry.name == task.get('exclude_child'):
-                            continue
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                dirs.append((entry.path, None))
-                                continue
-                            if relative_root == resume_directory and entry.name <= resume_name:
-                                continue
-                            if entry.is_symlink() and entry.is_dir():
-                                exclude(entry.path, 'directory symlink (not followed)')
-                                continue
-                        except OSError as e:
-                            exclude(entry.path, str(e))
-                            continue
-                        p = Path(entry.path)
-                        try:
-                            activity('stat_file', p)
-                            s = entry.stat()
-                            if not stat.S_ISREG(s.st_mode):
-                                exclude(p, 'special file')
-                                continue
-                            if '\n' in str(p) or '\r' in str(p):
-                                exclude(p, 'newline in filename')
-                                continue
-                            if paths and batch_bytes + s.st_size > self.config.get('chunk_bytes', 2*1024**3):
+                        if kind == 'directory':
+                            dirs.append((entry.path, None))
+                        elif kind == 'exclude':
+                            exclude(entry.path, value)
+                        elif kind == 'file':
+                            if paths and batch_bytes + value > self.config.get('chunk_bytes', 2*1024**3):
                                 flush()
-                            paths.append(str(p))
-                            sizes.append(s.st_size)
-                            batch_bytes += s.st_size
+                            paths.append(entry.path)
+                            sizes.append(value)
+                            batch_bytes += value
                             if len(paths) >= self.config.get('chunk_files', 1000):
                                 flush()
-                        except InterruptedError:
-                            raise
-                        except OSError as e:
-                            exclude(p, str(e))
+                        activity('metadata_wait', entry.path)
                     stack.extend(reversed(dirs))
                     del entries, dirs
                 flush()
@@ -365,11 +349,18 @@ class Queue:
                             and s['source'] in self.scan_activity
                             and self.scan_activity[s['source']]['operation'] != 'queue_backpressure'
                             and now-self.scan_activity[s['source']]['updated'] > self.config.get('scan_stall_seconds', 180)]
+        self.scan_control.observe(
+            {name: sum(g['chunks'] for g in groups if g['source']==name and g['state']=='pending')
+             for name in self.sources},
+            cgroup_metrics(),
+            {name: sum(g['files'] for g in groups if g['source']==name and g['state']=='done')
+             for name in self.sources})
         recovery, recovery_age, recovery_stale = (self.recovery_monitor.get() if self.recovery_monitor
                                                    else (None, None, False))
         return dict(updated=now, state=state, scan_complete=not scanning, groups=groups, scans=scans,
                     recovery=recovery, recovery_status_age_seconds=recovery_age,
                     recovery_status_stale=recovery_stale,
+                    scan_control=self.scan_control.snapshot(),
                     scanner_activity=dict(self.scan_activity),
                     last_completed_at=last_completed, upload_idle_seconds=now-last_completed if last_completed else None,
                     waiting_for_scan=scanning and not unfinished, stalled_scanners=stalled_scanners,
@@ -436,6 +427,7 @@ def coordinator(config):
             time.sleep(config.get('queue_mirror_seconds', 30))
     if queue.db_path != base/'queue.sqlite':
         threading.Thread(target=mirror_loop, daemon=True).start()
+    queue.scan_control.start()
     for task in config['tasks']:
         threading.Thread(target=queue.scan, args=(task,), daemon=True).start()
     while True:
@@ -487,6 +479,13 @@ def cgroup_metrics(base=Path('/sys/fs/cgroup')):
         result['cpu_throttled_seconds'] = int(cpu.get('throttled_usec',0))/1e6
     except (OSError, ValueError):
         pass
+    for kind in ['memory','io']:
+        try:
+            line = (base/(kind+'.pressure')).read_text().splitlines()[0]
+            values = dict(item.split('=',1) for item in line.split()[1:])
+            result[kind+'_pressure_some_avg10'] = float(values['avg10'])
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
     return result
 
 

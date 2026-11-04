@@ -81,3 +81,5 @@ SwanLab 新增 `00-总进度` 分组（指标前缀 `overview/`）：`dashboard`
 运行目录中的 `START` 用于首次启动闸门。创建 `STOP` 会让 worker 停止并保留状态；移除后 supervisor 自动重启 worker。若扫描线程已经因 STOP 中断，需要同时重启协调器服务，使其从持久清单恢复扫描。不要删除 `queue.sqlite`、清单或 token。`supervisors/*.json` 记录各节点 supervisor 与服务 PID；节点本地保留命令、stdout、工具失败清单和 checkpoint。协调器单写数据库，禁止另起进程直接修改它。
 
 测试：`python3 -m unittest discover -s tests -v`，涵盖并发领取、租约过期与拒绝旧结果、失败退避上限、扫描重启去重以及真实 HTTP 协调器与双 worker 的端到端执行。
+
+元数据扫描支持[有界并发、在线调参和自动回退](adaptive-scanning.md)，首次部署后可通过 `tune-scan` 切换扫描窗口，不需要反复重启上传任务。
