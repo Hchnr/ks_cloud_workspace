@@ -7,7 +7,17 @@ from pathlib import Path
 import time
 
 from .common import save
-from .overview import build_overview, render_guide, render_overview
+from .overview import build_overview, render_guide, render_overview, snapshot_freshness
+
+
+def metrics_for_snapshot(snapshot, config, metrics, now):
+    freshness = snapshot_freshness(snapshot, config, now)
+    if freshness['overview/snapshot_stale'] and not snapshot['state'].startswith('finished'):
+        # Do not timestamp old health/progress as a fresh observation. HTML keeps
+        # the last known values, with the same explicit stale-snapshot warning.
+        metrics = {key: metrics[key] for key in ['overview/dashboard', 'overview/metric_guide']
+                   if key in metrics}
+    return dict(metrics, **freshness)
 
 
 def configure_connection(config):
@@ -62,9 +72,10 @@ def run(config):
     save(state_file, state)
     inventory_path = config.get('overview_inventory_file')
     inventory = json.loads(Path(inventory_path).read_text()) if inventory_path else {}
-    # A dedicated group keeps the overall dashboard separate from per-node diagnostics.
+    # Keep the default Step axis. The current cloud creates an invalid frontend
+    # axis descriptor for explicit _relative_time definitions (blank charts).
     if hasattr(run, 'define_metric'):
-        run.define_metric('overview/*', section_name='00-总进度', x_axis='_relative_time')
+        run.define_metric('overview/*', section_name='00-总进度')
     interval = max(120, config.get('swanlab_interval', 120))
     time.sleep(max(0, state.get('last_enqueued', 0)+interval-time.time()))
     previous = None
@@ -113,6 +124,19 @@ def run(config):
                     if 'cpu_usage_seconds' in n and 'cpu_usage_seconds' in old:
                         m[prefix+'cpu_used_cores'] = max(0,n['cpu_usage_seconds']-old['cpu_usage_seconds'])/dt
             m['cluster/slot_imbalance'] = max(node_slots,default=0)-min(node_slots,default=0)
+            if config.get('ha_enabled'):
+                m['recovery/status_stale']=int(s.get('recovery_status_stale',False))
+                if s.get('recovery_status_age_seconds') is not None:
+                    m['recovery/status_age_seconds']=s['recovery_status_age_seconds']+max(0,now-s['updated'])
+            recovery=s.get('recovery')
+            if recovery:
+                leader=recovery['leader']
+                m['recovery/leader_index']=config['hosts'].index(leader['host']) if leader.get('host') in config['hosts'] else -1
+                m['recovery/generation']=leader.get('generation',0)
+                m['recovery/leader_heartbeat_age_seconds']=max(0,now-leader.get('updated',now))
+                m['recovery/guardians_alive']=sum(g['alive'] for g in recovery['guardians'].values())
+                m['recovery/queue_snapshot_age_seconds']=recovery['snapshot_age_seconds']
+                m['recovery/claim_grace_seconds']=max(0,leader.get('claims_after',0)-now)
             if previous:
                 dt = max(1,s['updated']-previous['updated'])
                 m['throughput/completed_files_s'] = max(0,s['completed_files']-previous['completed_files'])/dt
@@ -134,11 +158,15 @@ def run(config):
             except Exception as e:
                 # A presentation failure must not prevent scalar monitoring.
                 state['overview_error'] = type(e).__name__+': '+str(e)
+            m = metrics_for_snapshot(s, config, m, now)
             swanlab.log(m, step=step)
             if 'overview/dashboard' in m:
                 state['overview_last_enqueued'] = now
                 state['overview_last_step'] = step
-            state.update(last_step=step, last_enqueued=now, metrics_count=len(m), errors=0)
+            state.update(last_step=step, last_enqueued=now, metrics_count=len(m), errors=0,
+                         snapshot_updated=s['updated'],
+                         snapshot_age_seconds=m['overview/snapshot_age_seconds'],
+                         snapshot_stale=bool(m['overview/snapshot_stale']))
             errors = 0
             previous = s
             # Infrequent readback distinguishes SDK enqueue from confirmed cloud ingestion.

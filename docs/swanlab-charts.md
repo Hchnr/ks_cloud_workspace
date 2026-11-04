@@ -6,6 +6,17 @@
 
 2026-11-03 凌晨修复前，CPU/内存来自宿主机、活动数包含遗留租约；修复后按容器配额和心跳确认统计，前后不能直接比较。
 
+## recovery
+
+| 图表 | 含义 |
+|---|---|
+| `recovery/leader_index` | 当前协调器在 hosts 列表中的索引，0 为第一台 CPU 节点；-1 表示未知。 |
+| `recovery/generation` | 协调器任期累计编号，进程重启或接管后增加；原主恢复不抢占当前主。 |
+| `recovery/leader_heartbeat_age_seconds` | 距主节点最近一次成功发布共享心跳的秒数；默认 45 秒失效后拒绝 RPC。 |
+| `recovery/guardians_alive` | 最近 90 秒有守护状态上报的远端节点数量，目标为 16。 |
+| `recovery/queue_snapshot_age_seconds` | 距最近共享队列快照的秒数；恢复可能重做快照之后的增量检查。 |
+| `recovery/claim_grace_seconds` | 从共享快照接管后的任务领取隔离窗口剩余秒数；窗口内继续接受心跳及结果，不发新任务。 |
+
 ## progress
 
 | 图表 | 含义 |
@@ -68,6 +79,9 @@
 
 | 图表 | 含义 |
 |---|---|
+| `overview/waiting_for_scan` | 1 表示已生成任务均已处理，上传节点正在等待扫描器提供新任务；节点在线不代表上传仍在推进。 |
+| `overview/upload_idle_minutes` | 距最近一个成功分片完成的分钟数；初始尚无成功分片时为 0，需结合 waiting_for_scan 和扫描状态。 |
+| `overview/stalled_scanners` | 当前扫描操作超过 180 秒没有更新的扫描器数量，不含正常的队列预取等待。 |
 | `overview/coverage_bytes_pct` | 全量数据量覆盖率；扫描中使用历史清点参考总量（估算），扫描全部成功结束后用本轮扫描总量。 |
 | `overview/coverage_files_pct` | 全量文件数覆盖率；分母规则同上。文件数与字节数百分比可能差别很大。 |
 | `overview/total_is_exact` | 1 表示所有数据源扫描结束、总量来自本轮清单（排除项另列）；0 表示分母仍为参考值或未知。 |

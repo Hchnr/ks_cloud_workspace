@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from ks_cloud.dynamic import Queue, cgroup_metrics
@@ -160,6 +161,67 @@ class DynamicTests(unittest.TestCase):
         t = self.claim()
         self.assertEqual(t['config']['source'],str(self.src))
         self.assertEqual(t['config']['destination'],'ks3://bucket/original/')
+
+    def test_durable_scan_cursor_preserves_dfs_order_and_skips_committed_prefix(self):
+        names = ['zz-root', '00-old/a', '00-old/b', '10-current/m',
+                 '10-current/z', '10-current/aa-child/x', '20-later/a']
+        for name in names:
+            p = self.src/name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('payload')
+        (self.src/'broken').symlink_to('/missing-target')
+        (self.src/'linked').symlink_to(self.src/'20-later', target_is_directory=True)
+        expected = {str(self.src/name) for name in names}
+        for cutoff in range(1, len(names)+1):
+            with self.subTest(committed_chunks=cutoff):
+                config = dict(self.config, run_dir=str(self.base/f'resume-{cutoff}'), chunk_files=1)
+                q = Queue(config)
+                add = q.add
+                calls = 0
+                def interrupt_after_commit(*args):
+                    nonlocal calls
+                    add(*args)
+                    calls += 1
+                    if calls == cutoff:
+                        raise RuntimeError('simulated coordinator loss after durable commit')
+                q.add = interrupt_after_commit
+                q.scan(config['tasks'][0])
+                q.db.close()
+                q = Queue(config)
+                visited = []
+                scandir = os.scandir
+                def record(path):
+                    visited.append(str(path))
+                    return scandir(path)
+                try:
+                    with patch('ks_cloud.dynamic.os.scandir', side_effect=record):
+                        q.scan(config['tasks'][0])
+                    paths = []
+                    for row in q.db.execute('SELECT manifest FROM tasks'):
+                        paths.extend(Path(row['manifest']).read_text().splitlines())
+                    self.assertEqual(set(paths), expected)
+                    self.assertEqual(len(paths), len(expected))
+                    self.assertEqual(q.snapshot()['discovered_files'], len(expected))
+                    self.assertIn('2 excluded', q.snapshot()['scans'][0]['error'])
+                    if cutoff == 4:
+                        self.assertNotIn(str(self.src/'00-old'), visited)
+                        self.assertIn(str(self.src/'10-current/aa-child'), visited)
+                finally:
+                    q.db.close()
+
+    def test_waiting_for_scan_and_stalled_scanners_are_visible(self):
+        self.q.add('dataset', ['/source/one'], [100])
+        self.finish(self.claim(), exit_code=0, failed=0, succeeded=1, handled=1)
+        with self.q.db:
+            self.q.db.execute("UPDATE tasks SET finished=? WHERE state='done'", (time.time()-600,))
+        self.q.scan_state('dataset', 'scanning')
+        self.q.scan_activity['dataset'] = dict(operation='stat_file',path='/source/stuck',updated=time.time()-300)
+        s = self.q.snapshot()
+        self.assertTrue(s['waiting_for_scan'])
+        self.assertGreaterEqual(s['upload_idle_seconds'], 600)
+        self.assertEqual(s['stalled_scanners'], ['dataset'])
+        self.q.scan_activity['dataset']['operation'] = 'queue_backpressure'
+        self.assertEqual(self.q.snapshot()['stalled_scanners'], [])
 
     def test_http_coordinator_and_two_workers_end_to_end(self):
         fake = self.base/'fake-ks3util'

@@ -4,6 +4,16 @@ from html import escape
 
 
 GUIDE = {
+    'recovery': [
+        ('status_stale','恢复状态后台采集尚无数据或超过 90 秒未刷新时为 1；此时不报告旧的守护在线数。'),
+        ('status_age_seconds','恢复状态后台采样开始至今的秒数；辅助采集阻塞不会阻止上传进度更新。'),
+        ('leader_index','当前协调器在 hosts 列表中的索引，0 为第一台 CPU 节点；-1 表示未知。'),
+        ('generation','协调器任期累计编号，进程重启或接管后增加；原主恢复不抢占当前主。'),
+        ('leader_heartbeat_age_seconds','距主节点最近一次成功发布共享心跳的秒数；默认 45 秒失效后拒绝 RPC。'),
+        ('guardians_alive','最近 90 秒有守护状态上报的远端节点数量，目标为 16。'),
+        ('queue_snapshot_age_seconds','距最近共享队列快照的秒数；恢复可能重做快照之后的增量检查。'),
+        ('claim_grace_seconds','从共享快照接管后的任务领取隔离窗口剩余秒数；窗口内继续接受心跳及结果，不发新任务。'),
+    ],
     'progress': [
         ('completed_files', '完整成功分片中的已处理文件数，包含实际上传和增量跳过。'),
         ('completed_TiB', '已处理文件对应的数据量（TiB），包含跳过，不是网络上传量。'),
@@ -51,6 +61,9 @@ GUIDE = {
         ('network_rx_MiB_s', '节点网络命名空间平均接收速度（MiB/s），包含其他任务流量。'),
     ],
     'overview': [
+        ('waiting_for_scan', '1 表示已生成任务均已处理，上传节点正在等待扫描器提供新任务；节点在线不代表上传仍在推进。'),
+        ('upload_idle_minutes', '距最近一个成功分片完成的分钟数；初始尚无成功分片时为 0，需结合 waiting_for_scan 和扫描状态。'),
+        ('stalled_scanners', '当前扫描操作超过 180 秒没有更新的扫描器数量，不含正常的队列预取等待。'),
         ('coverage_bytes_pct', '全量数据量覆盖率；扫描中使用历史清点参考总量（估算），扫描全部成功结束后用本轮扫描总量。'),
         ('coverage_files_pct', '全量文件数覆盖率；分母规则同上。文件数与字节数百分比可能差别很大。'),
         ('total_is_exact', '1 表示所有数据源扫描结束、总量来自本轮清单（排除项另列）；0 表示分母仍为参考值或未知。'),
@@ -68,11 +81,20 @@ GUIDE = {
         ('failed_chunks', '最终失败的分片数。'),
         ('oom_kill_events', '所有节点容器 OOM Kill 累计计数之和；容器重建会影响连续性。'),
         ('snapshot_age_seconds', '看板生成时间距任务快照的秒数；过大说明监控数据可能陈旧。'),
+        ('snapshot_stale', '1 表示快照已过期（默认超过 90 秒）；运行中暂停上报旧的进度、吞吐和节点数值，仅保留新鲜度与带警告的看板。'),
         ('all_sources_successful', '仅完整无异常结束时为 1；未结束或存在失败/排除项时为 0。'),
         ('dashboard', '总进度 HTML 看板：参考/确切进度、实际上传量、各目录、节点负载和异常。'),
         ('metric_guide', '所有图表的逐项说明；节点同名指标共享定义，适用于全部 16 个节点。'),
     ],
 }
+
+
+def snapshot_freshness(snapshot, config, now):
+    age = max(0, now-snapshot['updated'])
+    limit = max(1, config.get('snapshot_stale_after_seconds',
+                             max(90, 3*config.get('coordinator_publish_seconds', 30))))
+    return {'overview/snapshot_age_seconds': age,
+            'overview/snapshot_stale': int(age > limit)}
 
 
 def guide_markdown():
@@ -110,6 +132,9 @@ def build_overview(snapshot, config, inventory=None, now=None):
     total = {k:sum(r['total'][k] for r in rows) for k in ['files','bytes']} if available else None
     counters = snapshot['counters']
     metrics = {
+        'overview/waiting_for_scan': int(snapshot.get('waiting_for_scan', False)),
+        'overview/upload_idle_minutes': (snapshot.get('upload_idle_seconds') or 0)/60,
+        'overview/stalled_scanners': len(snapshot.get('stalled_scanners', [])),
         'overview/total_is_exact': int(exact),
         'overview/completed_TiB': snapshot['completed_bytes']/1024**4,
         'overview/completed_files': snapshot['completed_files'],
@@ -121,7 +146,7 @@ def build_overview(snapshot, config, inventory=None, now=None):
         'overview/active_slots': len(snapshot['active']),
         'overview/failed_chunks': sum(r['failed'] for r in rows),
         'overview/oom_kill_events': sum(n.get('oom_kill_events',0) for n in snapshot['nodes'].values()),
-        'overview/snapshot_age_seconds': max(0,now-snapshot['updated']),
+        **snapshot_freshness(snapshot, config, now),
         'overview/all_sources_successful': int(snapshot['state']=='finished' and exact and not any(r['error'] or r['failed'] for r in rows)),
     }
     if available:
@@ -164,10 +189,19 @@ def render_overview(report):
     ts = datetime.fromtimestamp(report['updated'],timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S 北京时间')
     basis = '本轮扫描总量' if report['exact'] else '历史清点参考总量（估算）'
     body = f'<h1>16 节点上传 · 总进度看板</h1><p class="muted">快照：{ts} · 状态：{escape(report["state"])} · 约每 120 秒上传一份新快照，请查看最新 step。</p>'
+    if s.get('recovery_status_stale'):
+        body += '<p>恢复状态采集尚未完成或已过期；守护在线数暂不可用，上传进度仍独立更新。</p>'
+    if s.get('recovery'):
+        recovery=s['recovery'];leader=recovery['leader']
+        body += '<p>远端协调器：'+escape(leader.get('host','未知'))+f' · 任期 {leader.get("generation",0)} · 守护在线 {sum(g["alive"] for g in recovery["guardians"].values())}/{len(recovery["guardians"])}</p>'
     if not report['exact']:
         body += '<div class="notice">全量扫描尚未结束。以下总覆盖率使用历史清点参考量，不是精确完成率；已发现范围接近 100% 不代表全部数据已处理。各目录扫描完成后，其分母自动采用本轮实际扫描总量。</div>'
-    if m['overview/snapshot_age_seconds'] > 180:
-        body += '<div class="notice">当前任务快照超过 180 秒未刷新，以下数据可能陈旧。</div>'
+    if m['overview/snapshot_stale']:
+        body += f'<div class="notice">当前任务快照已过期（{m["overview/snapshot_age_seconds"]:.0f} 秒未刷新）。以下为最后已知状态，不能据此判断当前上传速度或节点是否在线。</div>'
+    if m['overview/waiting_for_scan']:
+        body += f'<div class="notice">上传队列为空，正在等待扫描器提供新任务；距最后完成分片已 {m["overview/upload_idle_minutes"]:.1f} 分钟。节点在线不代表上传仍在推进。</div>'
+    if m['overview/stalled_scanners']:
+        body += '<div class="notice">扫描操作超过阈值未更新：'+escape(', '.join(s['stalled_scanners']))+'。请检查下方扫描器当前位置及共享盘。</div>'
     def card(label,value,description=''):
         return f'<div class="card"><div class="label">{escape(label)}</div><div class="value">{escape(str(value))}</div><div class="muted">{escape(description)}</div></div>'
     pct = m.get('overview/coverage_bytes_pct')
