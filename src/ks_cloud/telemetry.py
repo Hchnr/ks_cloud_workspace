@@ -86,8 +86,9 @@ def run(config):
     save(state_file, state)
     inventory_path = config.get('overview_inventory_file')
     inventory = json.loads(Path(inventory_path).read_text()) if inventory_path else {}
-    # Keep the default Step axis. The current cloud creates an invalid frontend
-    # axis descriptor for explicit _relative_time definitions (blank charts).
+    # Leave the SDK axis unspecified: explicit _relative_time definitions create
+    # an invalid cloud descriptor. Existing view/chart presentation independently
+    # uses relative_time with type=SYSTEM, class=SCALAR; epoch-second steps persist.
     if hasattr(run, 'define_metric'):
         run.define_metric('overview/*', section_name='00-总进度')
     interval = max(120, config.get('swanlab_interval', 120))
