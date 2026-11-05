@@ -68,7 +68,7 @@ SwanLab 新增 `00-总进度` 分组（指标前缀 `overview/`）：`dashboard`
 
 总览 HTML 每 120 秒更新一份快照，请在媒体图表中查看最新 step；图表说明在旁路启动后上传一次。指标说明也保存在 [swanlab-charts.md](swanlab-charts.md)，运行目录保留最新 `overview.html` 和 `metric_guide.html`。HTML 展示失败不阻断原标量监控。新增看板只需更新旁路，不需要重启上传 worker 或协调器。
 
-总进度曲线使用默认 Step 横轴。2026-11-03 修复了显式 `_relative_time` 被云端创建为错误横轴类型、导致网页整组“暂无数据”的问题；历史指标一直存在，已原位修正已有 18 张曲线的显示配置。总进度组置于默认视图首位，前六张依次为数据覆盖率、完成量、剩余量、文件覆盖率、实际上传量和跳过量。云端 summary 有最新值只能证明数据入库，不能证明网页图表可用；验证需同时检查图表横轴与网页取数接口。已有图表不能靠重新调用 `define_metric` 修改，须更新原图表显示配置，保留历史数据。
+总进度曲线曾使用默认 Step 横轴；2026-11-04 已原位改为正确类型的 Relative Time 系统轴，以小时/天显示指标记录时长，默认视图覆盖其他普通曲线。底层 Step 仍保留 Unix 秒时间戳，具体北京时间在 HTML 总览中显示；当前网页绝对日期轴尚未实现，不能仅凭 API 支持 `time` 就直接启用。2026-11-03 修复了显式 `_relative_time` 被云端创建为错误横轴类型、导致网页整组“暂无数据”的问题；历史指标一直存在，已原位修正已有 18 张曲线的显示配置。总进度组置于默认视图首位，前六张依次为数据覆盖率、完成量、剩余量、文件覆盖率、实际上传量和跳过量。云端 summary 有最新值只能证明数据入库，不能证明网页图表可用；验证需同时检查图表横轴与网页取数接口。已有图表不能靠重新调用 `define_metric` 修改，须更新原图表显示配置，保留历史数据。
 
 容器实际限额是每节点 4 核、16 GiB。2026-11-03 起，资源图表改读 cgroup v2：`cpus` 是 CPU 配额，`memory_limit_GiB` 是容器内存上限，`memory_current_GiB` 包含文件缓存，`memory_anon_GiB` 是匿名内存，`memory_file_cache_GiB` 是文件缓存。`memory_used_pct` 现在表示匿名内存占容器上限的比例，旧数据使用宿主机口径，两段曲线不能直接比较。`oom_events`、`oom_kill_events` 是容器生命周期累计计数；`cpu_used_cores` 由容器 CPU 时间差分计算。`load1` 仍是宿主机负载，不能按 4 核容器负载解读。活动槽位按 worker 最近心跳确认的任务统计，未确认或等待回收的租约仅计入 `cluster/leased_chunks`。
 
@@ -81,3 +81,5 @@ SwanLab 新增 `00-总进度` 分组（指标前缀 `overview/`）：`dashboard`
 运行目录中的 `START` 用于首次启动闸门。创建 `STOP` 会让 worker 停止并保留状态；移除后 supervisor 自动重启 worker。若扫描线程已经因 STOP 中断，需要同时重启协调器服务，使其从持久清单恢复扫描。不要删除 `queue.sqlite`、清单或 token。`supervisors/*.json` 记录各节点 supervisor 与服务 PID；节点本地保留命令、stdout、工具失败清单和 checkpoint。协调器单写数据库，禁止另起进程直接修改它。
 
 测试：`python3 -m unittest discover -s tests -v`，涵盖并发领取、租约过期与拒绝旧结果、失败退避上限、扫描重启去重以及真实 HTTP 协调器与双 worker 的端到端执行。
+
+元数据扫描支持[有界并发、在线调参和自动回退](adaptive-scanning.md)，首次部署后可通过 `tune-scan` 切换扫描窗口，不需要反复重启上传任务。

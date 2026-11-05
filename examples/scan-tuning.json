@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "auto": true,
+  "workers": 2,
+  "max_workers": 8,
+  "prefetch_entries": 16,
+  "queue_high_chunks": 64,
+  "control_interval_seconds": 60,
+  "cooldown_seconds": 300,
+  "config_stale_seconds": 120,
+  "memory_anon_limit_pct": 65,
+  "memory_pressure_limit_pct": 25,
+  "io_pressure_limit_pct": 40,
+  "metadata_latency_limit_ms": 2000,
+  "regression_ratio": 0.75
+}

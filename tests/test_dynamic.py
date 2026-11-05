@@ -120,6 +120,8 @@ class DynamicTests(unittest.TestCase):
         for name, value in {'memory.max':str(16*1024**3),'memory.current':str(15*1024**3),
                             'memory.stat':f'anon {1024**3}\nfile {14*1024**3}\n',
                             'memory.events':'oom 2\noom_kill 1\n',
+                            'memory.pressure':'some avg10=2.50 avg60=1.00 avg300=0.50 total=123\n',
+                            'io.pressure':'some avg10=3.25 avg60=2.00 avg300=1.00 total=456\n',
                             'cpu.max':'400000 100000','cpu.stat':'usage_usec 2000000\nthrottled_usec 1000\n'}.items():
             (base/name).write_text(value)
         m = cgroup_metrics(base)
@@ -127,6 +129,8 @@ class DynamicTests(unittest.TestCase):
         self.assertEqual(m['memory_file_cache_GiB'],14)
         self.assertEqual(m['memory_used_pct'],6.25)
         self.assertEqual(m['oom_kill_events'],1)
+        self.assertEqual(m['memory_pressure_some_avg10'],2.5)
+        self.assertEqual(m['io_pressure_some_avg10'],3.25)
         self.assertLessEqual(m['cpus'],4)
 
     def test_partial_success_retries_and_caps_attempts(self):
@@ -236,6 +240,9 @@ class DynamicTests(unittest.TestCase):
             port = sock.getsockname()[1]
         c = dict(self.config, tool=str(fake), endpoint=f'http://127.0.0.1:{port}',port=port,
                  slots=2,heartbeat_seconds=0.1,worker_disconnect_seconds=3,local_root=str(self.base/'local'))
+        tuning = self.base/'scan-tuning.json'
+        tuning.write_text(json.dumps(dict(enabled=True,workers=4)))
+        c['scan_tuning_file'] = str(tuning)
         (self.q.base/'token').write_text('test-token')
         conf = self.base/'config.json'
         conf.write_text(json.dumps(c))

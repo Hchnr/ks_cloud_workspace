@@ -54,7 +54,11 @@ class OverviewTests(unittest.TestCase):
     def test_html_escapes_source_names_and_guide_covers_all_metric_families(self):
         self.config['tasks'][0]['id']='<script>alert(1)</script>'
         r = build_overview(self.s,self.config,self.ref)
+        self.s['scan_control'] = dict(revision=1,enabled=True,config_stale=False,sources={
+            '<script>alert(1)</script>':dict(workers=2,files_s=100,upload_files_s=90,metadata_ms=5,reason='<unsafe>',cooldown_seconds=0)})
         html = render_overview(r)
+        self.assertIn('扫描在线控制',html)
+        self.assertIn('&lt;unsafe&gt;',html)
         self.assertNotIn('<script>',html)
         self.assertIn('&lt;script&gt;',html)
         guide = render_guide()

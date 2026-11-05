@@ -20,6 +20,20 @@ def metrics_for_snapshot(snapshot, config, metrics, now):
     return dict(metrics, **freshness)
 
 
+def scan_metrics(snapshot):
+    control = snapshot.get('scan_control')
+    if not control:
+        return {}
+    result = {'scanning/control_revision':control['revision'],
+              'scanning/enabled':int(control['enabled']),
+              'scanning/config_stale':int(control['config_stale']),
+              'scanning/config_age_seconds':control['config_age_seconds']}
+    for source, values in control['sources'].items():
+        for key in ['workers','files_s','upload_files_s','metadata_ms','operations','errors','fallbacks','cooldown_seconds']:
+            result['scanning/'+source+'/'+key] = values[key]
+    return result
+
+
 def configure_connection(config):
     """Load private connection settings without placing credentials in run config."""
     legacy = Path('/share-mixed/project/eai_pwm/.secrets')
@@ -72,8 +86,9 @@ def run(config):
     save(state_file, state)
     inventory_path = config.get('overview_inventory_file')
     inventory = json.loads(Path(inventory_path).read_text()) if inventory_path else {}
-    # Keep the default Step axis. The current cloud creates an invalid frontend
-    # axis descriptor for explicit _relative_time definitions (blank charts).
+    # Leave the SDK axis unspecified: explicit _relative_time definitions create
+    # an invalid cloud descriptor. Existing view/chart presentation independently
+    # uses relative_time with type=SYSTEM, class=SCALAR; epoch-second steps persist.
     if hasattr(run, 'define_metric'):
         run.define_metric('overview/*', section_name='00-总进度')
     interval = max(120, config.get('swanlab_interval', 120))
@@ -104,6 +119,7 @@ def run(config):
                    'cluster/pending_chunks': sum(g['chunks'] for g in s['groups'] if g['state']=='pending'),
                    'cluster/scan_errors_or_exclusions': sum(bool(x['error']) for x in s['scans']),
                    'cluster/terminal': int(s['state'].startswith('finished'))})
+            m.update(scan_metrics(s))
             completed = {n['owner']: n for n in s['completed_by_node']}
             node_slots = []
             for host, n in s['nodes'].items():
