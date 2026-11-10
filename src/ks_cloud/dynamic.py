@@ -63,6 +63,8 @@ class Queue:
             self.db.execute('ALTER TABLE tasks ADD COLUMN request_id TEXT')
         if 'confirmed' not in {r[1] for r in self.db.execute('PRAGMA table_info(tasks)')}:
             self.db.execute('ALTER TABLE tasks ADD COLUMN confirmed INTEGER DEFAULT 0')
+        if 'scope_checked' not in {r[1] for r in self.db.execute('PRAGMA table_info(tasks)')}:
+            self.db.execute('ALTER TABLE tasks ADD COLUMN scope_checked INTEGER DEFAULT 0')
         self.db.execute('CREATE UNIQUE INDEX IF NOT EXISTS claim_requests ON tasks(request_id)')
         for task in config['tasks']:
             self.db.execute('INSERT OR IGNORE INTO scans VALUES (?, ?, ?)', (task['id'], 'pending', ''))
@@ -71,6 +73,10 @@ class Queue:
         self.scan_activity = {}
         self.cursor = 0
         self.scan_control = ScanControl(config)
+        if self.scan_control.scope:
+            for task in config['tasks']:
+                if self.scan_control.scope.resolve(task['source']) not in self.scan_control.scope.roots:
+                    raise ValueError('task source is not an approved root')
         self.recovery_monitor = RecoveryMonitor(config) if config.get('ha_enabled') else None
 
     def mirror(self):
@@ -103,7 +109,7 @@ class Queue:
             task['config']['parallel'] = self.config.get('large_file_parallel', 8)
         return dict(task=task)
 
-    def add(self, source, paths, sizes):
+    def add(self, source, paths, sizes, scope_checked=False):
         content = ''.join(p + '\n' for p in paths)
         digest = hashlib.sha256((content + repr(sizes)).encode()).hexdigest()[:32]
         tid = source + '-' + digest
@@ -115,8 +121,9 @@ class Queue:
             temp.write_text(content)
             os.replace(temp, manifest)
         with self.mutex, self.db:
-            self.db.execute('INSERT OR IGNORE INTO tasks(id,source,manifest,files,bytes) VALUES (?,?,?,?,?)',
-                            (tid, source, str(manifest), len(paths), sum(sizes)))
+            self.db.execute('INSERT OR IGNORE INTO tasks(id,source,manifest,files,bytes,scope_checked) VALUES (?,?,?,?,?,?)',
+                            (tid, source, str(manifest), len(paths), sum(sizes),
+                             int(bool(scope_checked and self.scan_control.scope))))
 
     def pending(self, source):
         with self.mutex:
@@ -166,11 +173,24 @@ class Queue:
             with audit.open() as history:
                 errors = sum(1 for line in history if line.strip())
         with audit.open('a' if cursor else 'w') as excluded:
+            audit_dirty = False
+
             def exclude(path, reason):
-                nonlocal errors
+                nonlocal errors, audit_dirty
                 errors += 1
                 activity('record_exclusion', path)
                 excluded.write(json.dumps(dict(path=str(path), reason=reason), ensure_ascii=False) + '\n')
+                audit_dirty = True
+
+            def flush_audit():
+                nonlocal audit_dirty
+                if audit_dirty:
+                    # The committed manifest is the restart cursor. Persist every
+                    # earlier exclusion before advancing that cursor, so a leader
+                    # crash cannot silently discard exclusions behind it.
+                    excluded.flush()
+                    os.fsync(excluded.fileno())
+                    audit_dirty = False
 
             def flush():
                 nonlocal paths, sizes, batch_bytes
@@ -186,7 +206,8 @@ class Queue:
                             raise InterruptedError('STOP requested')
                         time.sleep(2)
                     activity('commit_manifest', paths[-1])
-                    self.add(source, paths, sizes)
+                    flush_audit()
+                    self.add(source, paths, sizes, True)
                     paths, sizes, batch_bytes = [], [], 0
 
             try:
@@ -249,6 +270,7 @@ class Queue:
                     stack.extend(reversed(dirs))
                     del entries, dirs
                 flush()
+                flush_audit()
                 self.scan_state(source, 'done', f'{errors} excluded entries' if errors else '')
                 activity('done', task['source'])
             except Exception as e:
@@ -321,7 +343,7 @@ class Queue:
                 if (self.base / 'STOP').exists():
                     raise InterruptedError('STOP requested')
                 time.sleep(2)
-            self.add(source, paths, sizes)
+            self.add(source, paths, sizes, True)
             paths, sizes, batch_bytes = [], [], 0
 
         try:
@@ -336,7 +358,8 @@ class Queue:
                     if os.path.commonpath((os.path.abspath(link), os.path.abspath(task['source']))) != os.path.abspath(task['source']):
                         raise ValueError('link is outside configured source: ' + link)
                     activity('scan_directory_link', link)
-                    for kind, path, value in scan_link(link):
+                    entries = scan_link(link, self.scan_control.scope) if self.scan_control.scope else scan_link(link)
+                    for kind, path, value in entries:
                         if (self.base / 'STOP').exists():
                             raise InterruptedError('STOP requested')
                         activity('scan_directory_link', path)
@@ -433,11 +456,27 @@ class Queue:
             active = [dict(r) for r in self.db.execute("SELECT id,source,owner,heartbeat,files,bytes,progress,attempt FROM tasks WHERE state='running'")]
             completed = [dict(r) for r in self.db.execute("SELECT owner,count(*) AS chunks,sum(files) AS files,sum(bytes) AS bytes FROM tasks WHERE state='done' GROUP BY owner")]
             last_completed = self.db.execute("SELECT max(finished) FROM tasks WHERE state='done'").fetchone()[0]
-            counters = {}
-            for r in self.db.execute("SELECT result FROM tasks WHERE state='done'"):
-                result = json.loads(r[0])
-                for key in ['succeeded','skipped','succeeded_bytes','skipped_bytes']:
+            counters, scope_by_source, scope_by_owner = {}, {}, {}
+            for r in self.db.execute("SELECT source,owner,result FROM tasks WHERE state='done'"):
+                result = json.loads(r['result'])
+                for key in ['succeeded','skipped','succeeded_bytes','skipped_bytes',
+                            'scope_excluded_files','scope_excluded_bytes']:
                     counters[key] = counters.get(key, 0) + result.get(key, 0)
+                for table, name in ((scope_by_source, r['source']), (scope_by_owner, r['owner'])):
+                    pair = table.setdefault(name, [0, 0])
+                    pair[0] += result.get('scope_excluded_files', 0)
+                    pair[1] += result.get('scope_excluded_bytes', 0)
+        # Legacy queued manifests may contain paths outside the selected roots.
+        # Do not describe intentionally excluded files as verified in progress.
+        for group in groups:
+            if group['state'] == 'done':
+                files, size = scope_by_source.get(group['source'], (0, 0))
+                group['files'] = max(0, group['files'] - files)
+                group['bytes'] = max(0, group['bytes'] - size)
+        for node in completed:
+            files, size = scope_by_owner.get(node['owner'], (0, 0))
+            node['files'] = max(0, node['files'] - files)
+            node['bytes'] = max(0, node['bytes'] - size)
         for t in active:
             t['progress'] = json.loads(t['progress'])
         leased_chunks = len(active)
@@ -630,7 +669,8 @@ def worker(config, host):
     last_contact = [time.monotonic()]
 
     def rpc(action, data):
-        data = dict(data, host=host, protocol_version=3 if config.get('ha_enabled') else 2)
+        protocol = 4 if config.get('scope_allowed_roots') else (3 if config.get('ha_enabled') else 2)
+        data = dict(data, host=host, protocol_version=protocol)
         req = urllib.request.Request(discovery.get()+'/'+action, json.dumps(data).encode(),
                                      {'Authorization': 'Bearer '+token, 'Content-Type': 'application/json'})
         try:
@@ -693,6 +733,12 @@ def worker(config, host):
                             '--config', str(shared / 'config.json'), '--source', task['source'],
                             '--task-id', task['id'], '--manifest', task['manifest'],
                             '--expected', str(task['files']), '--folder', str(folder)]
+                elif config.get('scope_allowed_roots') and not task.get('scope_checked'):
+                    task_file = folder / 'scope-task.json'
+                    save(task_file, dict(scope_allowed_roots=config['scope_allowed_roots'],
+                                         upload=task['config'], manifest=task['manifest'], expected=task['files']))
+                    args = [sys.executable, '-S', '-B', '-m', 'ks_cloud.scoped_upload',
+                            '--task', str(task_file), '--folder', str(folder)]
                 else:
                     args = upload_command(task['config'], task['manifest'], folder)
                 save(folder / 'command.json', args)

@@ -7,8 +7,10 @@ different aliases of the same target must each retain their own object keys.
 import os
 import stat
 
+from .scope import OUTSIDE
 
-def scan_link(path):
+
+def scan_link(path, scope=None):
     """Yield (kind, path, value): file/size or exclusion/reason.
 
     The supplied path must be a directory symlink. Directory entries are
@@ -18,6 +20,14 @@ def scan_link(path):
     if not os.path.islink(path):
         yield 'exclude', path, 'expected directory symlink'
         return
+    if scope:
+        try:
+            if not scope.allows(path):
+                yield 'exclude', path, OUTSIDE
+                return
+        except OSError as error:
+            yield 'exclude', path, str(error)
+            return
     stack = [(path, frozenset())]
     while stack:
         directory, ancestors = stack.pop()
@@ -38,6 +48,9 @@ def scan_link(path):
         directories = []
         for entry in entries:
             try:
+                if entry.is_symlink() and scope and not scope.allows(entry.path):
+                    yield 'exclude', entry.path, OUTSIDE
+                    continue
                 info = entry.stat(follow_symlinks=True)
                 if stat.S_ISDIR(info.st_mode):
                     directories.append(entry.path)

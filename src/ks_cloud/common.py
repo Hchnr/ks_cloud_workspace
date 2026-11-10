@@ -43,9 +43,15 @@ def parse_progress(text):
         if sizes:
             size, unit = sizes[-1]
             result[key + '_bytes'] = float(size) * UNITS[unit]
+    excluded = re.findall(r'ScopeExcluded count:\s*(\d+)', text)
+    excluded_bytes = re.findall(r'ScopeExcluded bytes:\s*(\d+)B', text)
+    if excluded:
+        result['scope_excluded_files'] = int(excluded[-1])
+    if excluded_bytes:
+        result['scope_excluded_bytes'] = int(excluded_bytes[-1])
     if 'succeeded' in result and 'failed' in result:
         result.setdefault('skipped', 0)
-        result['handled'] = sum(result.get(k, 0) for k in ('succeeded', 'skipped', 'failed'))
+        result['handled'] = sum(result.get(k, 0) for k in ('succeeded', 'skipped', 'failed', 'scope_excluded_files'))
     return result
 
 

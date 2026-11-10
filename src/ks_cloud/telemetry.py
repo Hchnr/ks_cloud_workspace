@@ -112,6 +112,8 @@ def run(config):
                    'progress/uploaded_files_confirmed': counters.get('succeeded',0),
                    'progress/uploaded_TiB_confirmed': counters.get('succeeded_bytes',0)/1024**4,
                    'progress/skipped_files': counters.get('skipped',0),
+                   'progress/scope_excluded_files': counters.get('scope_excluded_files',0),
+                   'progress/scope_excluded_GiB': counters.get('scope_excluded_bytes',0)/1024**3,
                    'cluster/healthy_nodes': sum(n['healthy'] for n in s['nodes'].values()),
                    'cluster/active_slots': len(s['active']),
                    'cluster/leased_chunks': s.get('leased_chunks',len(s['active'])),
