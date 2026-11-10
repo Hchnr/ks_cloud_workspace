@@ -55,9 +55,12 @@ def successful(result):
 
 def upload_command(config, manifest, folder):
     folder = Path(folder)
+    update_rule = int(config.get('update_rule', 4))
+    if update_rule not in (1, 2, 3, 4, 5):
+        raise ValueError('update_rule must be between 1 and 5')
     args = [config['tool'], 'cp', config['source'].rstrip('/') + '/', config['destination'],
             '--config-file', config['config_file'], '--language', 'CH', '--object-file', str(manifest),
-            '--recursive', '--update', '--update-rule', '4', '--force',
+            '--recursive', '--update', '--update-rule', str(update_rule), '--force',
             '--jobs', str(config.get('jobs', 8)), '--parallel', str(config.get('parallel', 1)),
             '--list-parallel', str(config.get('list_parallel', 2)), '--part-size', '32MB',
             '--retry-times', '10', '--connect-timeout', '15', '--read-timeout', '60',

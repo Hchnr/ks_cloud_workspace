@@ -36,6 +36,52 @@ class DynamicTests(unittest.TestCase):
     def finish(self, task, host='a', **result):
         return self.q.rpc('finish', dict(host=host,id=task['id'],token=task['token'],result=result))
 
+    def test_presence_only_rule_reaches_worker_command(self):
+        from ks_cloud.common import upload_command
+        self.config['update_rule'] = 1
+        self.q.add('dataset', ['/source/one'], [1])
+        task = self.claim()
+        command = upload_command(task['config'], task['manifest'], self.base / 'worker')
+        self.assertEqual(command[command.index('--update-rule') + 1], '1')
+
+    def test_delete_queue_imports_only_completed_verified_tasks(self):
+        import sqlite3
+        verified = self.base / 'verified.sqlite'
+        with sqlite3.connect(verified) as db:
+            db.execute('CREATE TABLE tasks(id TEXT, source TEXT, manifest TEXT, files INTEGER, bytes INTEGER, state TEXT)')
+            db.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?)', ('dataset-one', 'dataset', '/verified/one', 2, 11, 'done'))
+        self.config.update(operation='delete_verified', verified_db=str(verified))
+        self.q.scan(self.config['tasks'][0])
+        task = self.claim()
+        self.assertEqual((task['id'], task['manifest'], task['files'], task['bytes']), ('dataset-one', '/verified/one', 2, 11))
+        self.assertEqual(self.q.db.execute('SELECT state FROM scans').fetchone()[0], 'done')
+
+    def test_link_ledger_replay_after_interrupted_manifest_commit(self):
+        target = self.src / 'target'
+        target.mkdir()
+        for name in ('a', 'b', 'c'):
+            (target / name).write_text(name)
+        link = self.src / 'alias'
+        link.symlink_to(target, target_is_directory=True)
+        ledger = self.base / 'ledger.jsonl'
+        ledger.write_text(json.dumps(dict(path=str(link), reason='directory symlink (not followed)')) + '\n')
+        task = dict(self.config['tasks'][0], link_exclusions_file=str(ledger))
+        from ks_cloud.link_scan import scan_link
+        def interrupted(path):
+            for index, item in enumerate(scan_link(path)):
+                if index == 2:
+                    raise RuntimeError('simulated crash')
+                yield item
+        with patch('ks_cloud.dynamic.scan_link', interrupted):
+            self.q.scan(task)
+        self.assertEqual(self.q.db.execute('SELECT state FROM scans').fetchone()[0], 'error')
+        self.assertEqual(self.q.db.execute('SELECT count(*) FROM tasks').fetchone()[0], 1)
+        self.q.scan(task)
+        self.assertEqual(self.q.db.execute('SELECT state FROM scans').fetchone()[0], 'done')
+        rows = self.q.db.execute('SELECT manifest FROM tasks').fetchall()
+        files = [line for row in rows for line in Path(row[0]).read_text().splitlines()]
+        self.assertEqual(sorted(files), [str(link / name) for name in ('a', 'b', 'c')])
+
     def test_concurrent_claims_unique_and_progress_not_double_counted(self):
         for i in range(24):
             self.q.add('dataset', [f'/source/{i}'], [i+1])

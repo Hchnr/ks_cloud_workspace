@@ -132,17 +132,45 @@ class Discovery:
         self.endpoint = config['endpoint']
         self.checked = 0
         self.mutex = threading.Lock()
+        self.collecting = False
+        self.rejected_until = {}
+
+    def _refresh(self):
+        try:
+            # A hard-mounted NFS read can wait indefinitely. Never hold the
+            # discovery mutex or the RPC caller while reading this file.
+            current = leader_record(self.config)
+            endpoint = current.get('endpoint')
+            with self.mutex:
+                if endpoint and time.monotonic() >= self.rejected_until.get(endpoint, 0):
+                    self.endpoint = endpoint
+        except Exception:
+            pass
+        finally:
+            with self.mutex:
+                self.collecting = False
 
     def get(self, force=False):
         if not self.config.get('ha_enabled'):
             return self.endpoint
+        start = False
         with self.mutex:
-            if force or time.monotonic()-self.checked >= self.config.get('leader_refresh_seconds',5):
-                current = leader_record(self.config)
-                if current.get('endpoint'):
-                    self.endpoint = current['endpoint']
-                self.checked = time.monotonic()
-        return self.endpoint
+            now = time.monotonic()
+            if force:
+                self.rejected_until[self.endpoint] = now + 10
+                candidates = list(dict.fromkeys([self.config['endpoint']] +
+                                                list(self.config.get('coordinator_endpoints', {}).values())))
+                index = candidates.index(self.endpoint) if self.endpoint in candidates else -1
+                rotated = candidates[index + 1:] + candidates[:index + 1]
+                self.endpoint = next((e for e in rotated if now >= self.rejected_until.get(e, 0)), rotated[0])
+            if not self.collecting and (force or now-self.checked >= self.config.get('leader_refresh_seconds',5)):
+                self.collecting = True
+                self.checked = now
+                start = True
+            endpoint = self.endpoint
+        if start:
+            threading.Thread(target=self._refresh, daemon=True, name='leader-discovery').start()
+        return endpoint
 
 
 def recovery_snapshot(config):

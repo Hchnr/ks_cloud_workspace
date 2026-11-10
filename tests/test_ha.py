@@ -18,6 +18,26 @@ from ks_cloud.ha import Discovery, Leadership, restore_for_leadership, locked_ow
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_blocked_leader_read_does_not_block_rpc_or_candidate_failover(self):
+        entered, release = threading.Event(), threading.Event()
+        def blocked(config):
+            entered.set()
+            release.wait(5)
+            return {'endpoint': 'http://127.0.0.1:2'}
+        discovery = Discovery(dict(self.config, leader_refresh_seconds=0))
+        with patch('ks_cloud.ha.leader_record', side_effect=blocked) as read:
+            try:
+                self.assertEqual(discovery.get(), 'http://127.0.0.1:1')
+                self.assertTrue(entered.wait(1))
+                started = time.monotonic()
+                self.assertEqual(discovery.get(force=True), 'http://127.0.0.1:2')
+                for _ in range(20):
+                    discovery.get(force=True)
+                self.assertLess(time.monotonic()-started, .5)
+                self.assertEqual(read.call_count, 1)
+            finally:
+                release.set()
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.root=Path(self.tmp.name)
