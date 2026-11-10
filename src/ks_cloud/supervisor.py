@@ -27,7 +27,8 @@ def run(config_path, host):
     if host in candidates:
         commands['coordinator'] = [sys.executable,'-S','-B','-m','ks_cloud.dynamic','coordinator','--config',config_path,'--host',host]
         if config.get('swanlab_enabled', True):
-            commands['swanlab'] = [config['swanlab_python'],'-B','-m','ks_cloud.telemetry','--config',config_path]
+            telemetry = 'ks_cloud.delete_telemetry' if config.get('operation') == 'delete_verified' else 'ks_cloud.telemetry'
+            commands['swanlab'] = [config['swanlab_python'],'-B','-m',telemetry,'--config',config_path]
     children, restarts, next_start = {}, {}, {}
     stopping = False
     boot = time.monotonic()

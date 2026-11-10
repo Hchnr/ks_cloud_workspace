@@ -39,6 +39,20 @@ SwanLab 使用独立 Python 环境，在 `swanlab_python` 指定其解释器，`
 
 2026-11-02 的运行目录为 `runs/dynamic_20261102_16cpu/`，包含已确认的 9 组源与目标映射。目标沿用 `ks3://baai-eai/backup_20261023/` 下原完整路径。原批次已停止，旧结果保留；新运行通过 `--update --update-rule 4` 检查并补传。不会删除目标已有数据。
 
+本批次的源目录和 KS3 对象前缀如下。此表供查阅；执行时以运行配置 `runs/dynamic_20261102_16cpu/config.json` 的 `tasks` 为准。
+
+| 数据集 | 源目录 | KS3 目标前缀 |
+| --- | --- | --- |
+| `koala-36m_v2` | `/share-mixed/project/eai_pwm/pipeline_store/materialized/koala-36m_v2` | `ks3://baai-eai/backup_20261023/share-mixed/project/eai_pwm/pipeline_store/materialized/koala-36m_v2/` |
+| `latents` | `/share-mixed/project/eai_pwm/pipeline_store/latents` | `ks3://baai-eai/backup_20261023/share-mixed/project/eai_pwm/pipeline_store/latents/` |
+| `prepared_datasets` | `/share-mixed/project/eai_pwm/prepared_datasets` | `ks3://baai-eai/backup_20261023/share-mixed/project/eai_pwm/prepared_datasets/` |
+| `train` | `/share-mixed/project/eai_pwm/datasets/train` | `ks3://baai-eai/backup_20261023/share-mixed/project/eai_pwm/datasets/train/` |
+| `action100m_v2` | `/share-mixed/project/eai_pwm/pipeline_store/materialized/action100m_v2` | `ks3://baai-eai/backup_20261023/share-mixed/project/eai_pwm/pipeline_store/materialized/action100m_v2/` |
+| `Sekai` | `/share-mixed/projset/eai_pwm/datasets/Sekai` | `ks3://baai-eai/backup_20261023/share-mixed/projset/eai_pwm/datasets/Sekai/` |
+| `Eidon-Tracker-POV` | `/share-mixed/project/yhzhang/data/Eidon-Tracker-POV` | `ks3://baai-eai/backup_20261023/share-mixed/project/yhzhang/data/Eidon-Tracker-POV/` |
+| `yuanhai` | `/share-mixed/project/eai_pwm/home/yuanhai` | `ks3://baai-eai/backup_20261023/share-mixed/project/eai_pwm/home/yuanhai/` |
+| `hand_pose` | `/share-mixed/project/yhzhang/data/Eidon-Tracker-POV/hand_pose` | `ks3://baai-eai/backup_20261023/share-mixed/project/yhzhang/data/Eidon-Tracker-POV/hand_pose/` |
+
 扫描与上传同时进行，每片最多 1,000 个文件或约 2 GiB，超限单文件独立成片。清单按内容寻址；扫描器重启后以最后一份已提交清单的末文件为游标，按“当前目录文件优先、子目录按名称深度优先”的稳定顺序续扫，跳过已提交前缀，排除审计追加保留。待领或等待重试的清单也属于已提交工作，继续由队列调度。已完成扫描不会重扫。每组源最多预取 256 片，避免清单无限增长。源目录在本轮扫描、上传期间必须保持稳定；游标之前新加的文件不会在本次续扫中发现，完整新一轮检查应使用新运行目录。这是对运行期间发现文件的备份，不提供文件系统快照一致性。
 
 2026-11-03 修复了协调器恢复时从头遍历数百万已处理文件、导致队列排空后长时间无上传的问题。扫描祖先目录时直接定位游标分支，后续兄弟目录延迟分类；普通目录边分类边生成文件分片，避免等整个大目录分类结束后才发任务。`status.json` 的 `scanner_activity` 记录当前操作、路径、更新时间及续扫游标；`waiting_for_scan` 表示队列排空等待扫描供给，`upload_idle_seconds` 表示距最近成功分片的秒数，`stalled_scanners` 标记超过默认 180 秒不更新的扫描操作。SwanLab 总览同步对应指标和等待提示，不能仅用节点心跳判断上传健康。协调器注册了 `SIGUSR1` 线程栈诊断信号；只对确认运行本版本的协调器使用，日志写入节点本地 `coordinator.log`。
@@ -48,6 +62,16 @@ SwanLab 使用独立 Python 环境，在 `swanlab_python` 指定其解释器，`
 心跳间隔 15 秒，worker 与协调器断连超过 90 秒会终止上传进程组；协调器在 240 秒后回收租约。上传子进程设置 Linux parent-death signal，worker 意外退出也会终止上传。租约 token 拒绝过期回报，领取请求带持久到本次重试结束的 request ID，回复丢失时重试领取同一个分片；服务器另行限制每节点最多 2 个未结束租约。未收到过 worker 心跳确认的过期领取不消耗上传重试预算。完成确认可以幂等重试。失败采用指数退避，最多 5 次整片尝试，工具内部另有请求重试。30 分钟没有文件数或字节进展会终止并重试该片。最终失败保留在队列和节点输出中，状态标为 `finished_with_issues`，不会当作成功。
 
 扫描会记录失效链接、特殊文件、无法访问的路径以及未跟随的目录软链接，保存到 `excluded-*.jsonl`。Eidon 主任务排除 `hand_pose` 子目录，该目录单独上传。只将工具退出成功、失败数为零、处理文件数与清单完全一致的分片标记为完成。空目录、Unix 权限、软链接本身不在备份范围内；已有对象增量跳过不是重新计算内容哈希。
+
+### 目录链接补传
+
+可使用独立运行补传历史排除清单中的目录链接：在对应任务配置中设置 `link_exclusions_file` 为一份固定的 `excluded-<source>.jsonl` 副本，其余源目录和目标前缀沿用原映射。扫描只处理原因恰为 `directory symlink (not followed)` 的记录，沿链接路径生成普通文件清单；目录链接自身不会成为 KS3 对象。对多个指向相同目标的路径分别生成对象，检测祖先目录循环并将失效链接、循环、特殊文件和读取错误记入新运行的排除清单。
+
+此模式使用原有动态领取、增量上传和重试；重启后从固定清单开头重扫，已提交的内容寻址分片会去重。因此清单及源目录应在扫描期间保持稳定，否则重新分片可能重复检查，且无法保证覆盖变化中的目录。源文件消失时必须记录并处理异常，不可把扫描完成直接当作完整备份。扫描期间新运行只展示其已发现和已处理的数据，不能与原运行的总量直接相加作为全量进度。扫描为协调器上的单线程遍历，上传仍由多节点动态领取。
+
+`update_rule=1` 可用于仅按目标路径是否存在进行检查并补传缺失对象；已有对象不会按大小或内容重新校验。`presence_followup` 在主扫描完成后接续目录链接检查，并在某一轮没有新增上传后结束；失效链接、读取错误及其他排除项仍需单独检查，不能以零新增上传代替完整性证明。
+
+仓库中的 `delete_plan`、`verified_delete` 和 `delete_telemetry` 是清理流程的准备组件：当前尚未完成 16 节点删除编排、空目录处理和端到端恢复验证，不应在生产环境创建删除闸门或启动清理。创建未激活的清理计划也要求主扫描、目录链接补扫及源路径身份检查完成；未覆盖的条目必须保留并单独处理。
 
 本环境原 HTTP 代理路径的大文件测试失败；使用 `--enable-http2` 启用 HTTPS 后，256 MiB 分片上传成功，并回读确认大小及 CRC64。运行保留这一参数，未修改全局凭据配置。
 

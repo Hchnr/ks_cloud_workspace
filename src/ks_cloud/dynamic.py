@@ -22,6 +22,7 @@ import uuid
 
 from .common import parse_progress, save, successful, tail, upload_command
 from .scan_control import ScanControl
+from .link_scan import scan_link
 from .ha import Discovery, Leadership, restore_for_leadership, RecoveryMonitor, locked_owner
 
 
@@ -96,6 +97,7 @@ class Queue:
         task = dict(row)
         config = dict(self.config, **self.sources[row['source']])
         task['config'] = {k: config[k] for k in ['tool','config_file','source','destination','jobs','parallel','list_parallel']}
+        task['config']['update_rule'] = config.get('update_rule', 4)
         task['config']['enable_http2'] = self.config.get('enable_http2', True)
         if row['files'] <= 2 and row['bytes'] >= 1024**3:
             task['config']['parallel'] = self.config.get('large_file_parallel', 8)
@@ -125,6 +127,10 @@ class Queue:
             self.db.execute('UPDATE scans SET state=?,error=? WHERE source=?', (state, error, source))
 
     def scan(self, task):
+        if self.config.get('operation') == 'delete_verified':
+            return self.import_verified(task)
+        if task.get('link_exclusions_file'):
+            return self.scan_excluded_links(task)
         source = task['id']
         cursor = None
         resume_directory = None
@@ -248,6 +254,109 @@ class Queue:
             except Exception as e:
                 self.scan_state(source, 'error', str(e))
                 activity('error', self.scan_activity[source]['path'])
+
+    def import_verified(self, task):
+        """Import completed presence-check manifests into a separate deletion queue."""
+        source = task['id']
+        with self.mutex:
+            if self.db.execute('SELECT state FROM scans WHERE source=?', (source,)).fetchone()[0] == 'done':
+                return
+        self.scan_state(source, 'scanning')
+        self.scan_activity[source] = dict(operation='import_verified', path=task['source'], updated=time.time(), resumed_after=None)
+        try:
+            verified = Path(self.config['verified_db']).resolve()
+            with sqlite3.connect(verified.as_uri() + '?mode=ro&immutable=1', uri=True) as db:
+                for tid, manifest, files, size, state in db.execute(
+                        'SELECT id,manifest,files,bytes,state FROM tasks WHERE source=? ORDER BY rowid', (source,)):
+                    if state != 'done' or not tid.startswith(source + '-') or files <= 0 or size < 0:
+                        raise ValueError('invalid or unfinished verified task')
+                    with self.mutex:
+                        exists = self.db.execute('SELECT 1 FROM tasks WHERE id=?', (tid,)).fetchone()
+                    while not exists and self.pending(source) >= self.scan_control.queue_limit(self.config.get('pending_per_source', 256)):
+                        if (self.base / 'STOP').exists():
+                            raise InterruptedError('STOP requested')
+                        time.sleep(2)
+                    if (self.base / 'STOP').exists():
+                        raise InterruptedError('STOP requested')
+                    with self.mutex, self.db:
+                        self.db.execute('INSERT OR IGNORE INTO tasks(id,source,manifest,files,bytes) VALUES (?,?,?,?,?)',
+                                        (tid, source, manifest, files, size))
+                    self.scan_activity[source] = dict(operation='import_verified', path=manifest, updated=time.time(), resumed_after=None)
+            self.scan_state(source, 'done')
+            self.scan_activity[source] = dict(operation='done', path=task['source'], updated=time.time(), resumed_after=None)
+        except Exception as error:
+            self.scan_state(source, 'error', str(error))
+            self.scan_activity[source] = dict(operation='error', path=task['source'], updated=time.time(), resumed_after=None)
+
+    def scan_excluded_links(self, task):
+        """Replay a stable exclusion ledger into the normal idempotent queue.
+
+        Replay starts at the beginning after a crash: content-addressed chunks
+        already committed are ignored. This avoids losing files when a crash
+        occurs between publishing a manifest and saving a separate cursor.
+        """
+        source = task['id']
+        with self.mutex:
+            if self.db.execute('SELECT state FROM scans WHERE source=?', (source,)).fetchone()[0] == 'done':
+                return
+        self.scan_state(source, 'scanning')
+        paths, sizes = [], []
+        batch_bytes = 0
+        errors = 0
+        audit = self.base / ('excluded-' + source + '.jsonl')
+
+        def activity(operation, path):
+            self.scan_activity[source] = dict(operation=operation, path=str(path), updated=time.time(), resumed_after=None)
+
+        def flush():
+            nonlocal paths, sizes, batch_bytes
+            if not paths:
+                return
+            content = ''.join(p + '\n' for p in paths)
+            tid = source + '-' + hashlib.sha256((content + repr(sizes)).encode()).hexdigest()[:32]
+            with self.mutex:
+                exists = self.db.execute('SELECT 1 FROM tasks WHERE id=?', (tid,)).fetchone()
+            while not exists and self.pending(source) >= self.scan_control.queue_limit(self.config.get('pending_per_source', 256)):
+                activity('queue_backpressure', paths[-1])
+                if (self.base / 'STOP').exists():
+                    raise InterruptedError('STOP requested')
+                time.sleep(2)
+            self.add(source, paths, sizes)
+            paths, sizes, batch_bytes = [], [], 0
+
+        try:
+            with open(task['link_exclusions_file']) as ledger, audit.open('w') as excluded:
+                for line in ledger:
+                    if (self.base / 'STOP').exists():
+                        raise InterruptedError('STOP requested')
+                    item = json.loads(line)
+                    if item.get('reason') != 'directory symlink (not followed)':
+                        continue
+                    link = item['path']
+                    if os.path.commonpath((os.path.abspath(link), os.path.abspath(task['source']))) != os.path.abspath(task['source']):
+                        raise ValueError('link is outside configured source: ' + link)
+                    activity('scan_directory_link', link)
+                    for kind, path, value in scan_link(link):
+                        if (self.base / 'STOP').exists():
+                            raise InterruptedError('STOP requested')
+                        activity('scan_directory_link', path)
+                        if kind == 'exclude':
+                            errors += 1
+                            excluded.write(json.dumps(dict(path=path, reason=value), ensure_ascii=False) + '\n')
+                            continue
+                        if paths and batch_bytes + value > self.config.get('chunk_bytes', 2*1024**3):
+                            flush()
+                        paths.append(path)
+                        sizes.append(value)
+                        batch_bytes += value
+                        if len(paths) >= self.config.get('chunk_files', 1000):
+                            flush()
+                flush()
+            self.scan_state(source, 'done', f'{errors} excluded entries' if errors else '')
+            activity('done', task['source'])
+        except Exception as error:
+            self.scan_state(source, 'error', str(error))
+            activity('error', task['source'])
 
     def rpc(self, action, data):
         now = time.time()
@@ -561,6 +670,9 @@ def worker(config, host):
     def slot(index):
         request_id = uuid.uuid4().hex
         while not stop.is_set():
+            if config.get('operation') == 'delete_verified' and not (shared / 'DELETE_ENABLED').exists():
+                stop.wait(5)
+                continue
             task = None
             try:
                 r = rpc('claim', dict(request_id=request_id))
@@ -576,7 +688,13 @@ def worker(config, host):
                 folder = base / task['id']
                 folder.mkdir(exist_ok=True)
                 log = folder / 'stdout.log'
-                args = upload_command(task['config'], task['manifest'], folder)
+                if config.get('operation') == 'delete_verified':
+                    args = [sys.executable, '-S', '-B', '-m', 'ks_cloud.verified_delete',
+                            '--config', str(shared / 'config.json'), '--source', task['source'],
+                            '--task-id', task['id'], '--manifest', task['manifest'],
+                            '--expected', str(task['files']), '--folder', str(folder)]
+                else:
+                    args = upload_command(task['config'], task['manifest'], folder)
                 save(folder / 'command.json', args)
                 with log.open('wb', buffering=0) as output:
                     guarded = [sys.executable, '-S', '-B', '-m', 'ks_cloud.exec_child', str(os.getpid())] + args
