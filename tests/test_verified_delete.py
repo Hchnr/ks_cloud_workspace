@@ -101,6 +101,23 @@ class VerifiedDeleteTests(unittest.TestCase):
                 self.execute(manifest, 1)
         self.assertTrue(normal.exists())
 
+    def test_cloud_recheck_with_new_upload_deletes_nothing(self):
+        first = self.source / 'already-in-cloud'
+        second = self.source / 'newly-uploaded'
+        first.write_text('first')
+        second.write_text('second')
+        manifest = self.add_manifest([first, second])
+        def uploaded(args, stdout, **kwargs):
+            stdout.write(b'Succeed count: 1 Failed count: 0 Skip count: 1\n')
+            class Result:
+                returncode = 0
+            return Result()
+        with patch('ks_cloud.verified_delete.subprocess.run', uploaded):
+            with self.assertRaisesRegex(RuntimeError, 'without uploads'):
+                self.execute(manifest, 2)
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+
     def test_stale_root_and_missing_gate_prevent_deletion(self):
         normal = self.source / 'file'
         normal.write_text('content')

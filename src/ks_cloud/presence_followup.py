@@ -92,8 +92,16 @@ def prepare_round(config, counts, number, port):
     temp = Path(tempfile.mkdtemp(prefix=final.name + '-preparing-', dir=parent.parent))
     try:
         child = dict(config)
+        # A directory-link replay uses its own scanner and may contain only a
+        # subset of sources. The prepared-dataset shard pool applies solely to
+        # full ordinary-path scans and must not be inherited by this child.
+        for key in ('parallel_scan_tuning_file', 'parallel_scan_source', 'parallel_scan_base',
+                    'parallel_yuanhai_scan_base'):
+            child.pop(key, None)
         child['tasks'] = [dict(t, link_exclusions_file=str(parent / 'followup-inputs' / (t['id'] + '.jsonl')))
                           for t in config['tasks'] if counts[t['id']]]
+        child.update(presence_followup_enabled=False, global_followup_enabled=False,
+                     scan_autotune_enabled=False)
         child['run_dir'] = str(final)
         child['port'] = port
         child['endpoint'] = config['endpoint'].rsplit(':', 1)[0] + ':' + str(port)

@@ -6,10 +6,23 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from ks_cloud.telemetry import configure_connection, metrics_for_snapshot
+from ks_cloud.telemetry import configure_connection, metrics_for_snapshot, scan_metrics
 
 
 class SnapshotFreshnessTests(unittest.TestCase):
+    def test_link_fleet_and_durable_link_coverage_are_reported(self):
+        snapshot = dict(scan_control=dict(revision=0, enabled=False, config_stale=False,
+                                         config_age_seconds=1, sources={}),
+                        parallel_link_scan=dict(enabled=True,max_nodes=8,effective_nodes=4,
+                                                active_nodes=3,queued=2,fallbacks=1,
+                                                nodes={'cpu-worker-0':dict(healthy=True,active=True,
+                                                                          files=120,batches=3,errors=0)}),
+                        link_scan_progress={'yuanhai':dict(completed_links=128,total_links=512)})
+        m = scan_metrics(snapshot)
+        self.assertEqual(m['link_scanning/yuanhai/coverage_pct'], 25)
+        self.assertEqual(m['link_scan_fleet/effective_nodes'], 4)
+        self.assertEqual(m['link_scan_fleet/cpu-worker-0/files'], 120)
+
     def test_stale_running_snapshot_does_not_publish_old_health_progress_or_rates(self):
         metrics = {'cluster/healthy_nodes': 16, 'nodes/n/healthy': 1,
                    'progress/completed_files': 42, 'throughput/completed_files_s': 0,

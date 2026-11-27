@@ -24,6 +24,8 @@ from .common import parse_progress, save, successful, tail, upload_command
 from .scan_control import ScanControl
 from .link_scan import scan_link
 from .ha import Discovery, Leadership, restore_for_leadership, RecoveryMonitor, locked_owner
+from .parallel_scan import BatchParallelScanPool, ParallelScanPool, ENTRY_BATCH_THRESHOLD
+from .parallel_links import LinkScanPool
 
 
 class Queue:
@@ -73,11 +75,41 @@ class Queue:
         self.scan_activity = {}
         self.cursor = 0
         self.scan_control = ScanControl(config)
+        self.parallel_scan = None
+        self.parallel_yuanhai_scan = None
+        self.parallel_links = None
+        self.link_progress = {}
         if self.scan_control.scope:
             for task in config['tasks']:
                 if self.scan_control.scope.resolve(task['source']) not in self.scan_control.scope.roots:
                     raise ValueError('task source is not an approved root')
+        if config.get('parallel_scan_tuning_file'):
+            source = next((t for t in config['tasks'] if t['id'] == config.get('parallel_scan_source')), None)
+            base = config.get('parallel_scan_base', '')
+            if (not self.scan_control.scope or not source or not os.path.isabs(base)
+                    or os.path.normpath(base) != base
+                    or not base.startswith(source['source']+os.sep)):
+                raise ValueError('parallel scan base is not within an approved source')
+            self.parallel_scan = ParallelScanPool(config)
+        if config.get('parallel_yuanhai_scan_base'):
+            source = next((t for t in config['tasks'] if t['id'] == 'yuanhai'), None)
+            base = config['parallel_yuanhai_scan_base']
+            if (not self.parallel_scan or not self.scan_control.scope or not source
+                    or not os.path.isabs(base) or os.path.normpath(base) != base
+                    or not base.startswith(source['source']+os.sep)):
+                raise ValueError('yuanhai parallel scan base is not within its approved source')
+            self.parallel_yuanhai_scan = BatchParallelScanPool(config)
         self.recovery_monitor = RecoveryMonitor(config) if config.get('ha_enabled') else None
+        if config.get('parallel_link_scan_tuning_file') and any(t.get('link_exclusions_file') for t in config['tasks']):
+            if not self.scan_control.scope:
+                raise ValueError('parallel links require an explicit scope')
+            self.db.execute('''CREATE TABLE IF NOT EXISTS link_cursors
+                (source TEXT PRIMARY KEY, digest TEXT, next_index INTEGER, errors INTEGER, audit_bytes INTEGER,
+                 total_links INTEGER, batch_links INTEGER)''')
+            self.db.commit()
+            self.parallel_links = LinkScanPool(config)
+            self.link_progress = {r['source']: dict(completed_links=r['next_index'], total_links=r['total_links'])
+                                  for r in self.db.execute('SELECT * FROM link_cursors')}
 
     def mirror(self):
         """Take a local consistent snapshot; shared disk writes never hold the RPC lock."""
@@ -139,6 +171,8 @@ class Queue:
         if task.get('link_exclusions_file'):
             return self.scan_excluded_links(task)
         source = task['id']
+        parallel = (self.parallel_scan if source == self.config.get('parallel_scan_source') else
+                    self.parallel_yuanhai_scan if source == 'yuanhai' else None)
         cursor = None
         resume_directory = None
         resume_name = None
@@ -218,6 +252,8 @@ class Queue:
                 # Some roots contain over a million immediate child directories.
                 stack = [(task['source'], None)]
                 while stack:
+                    if parallel:
+                        parallel.prime(stack, cursor)
                     root, pending_entry = stack.pop()
                     if pending_entry is not None:
                         activity('classify_entry', root)
@@ -228,6 +264,25 @@ class Queue:
                     activity('check_stop', self.base / 'STOP')
                     if (self.base / 'STOP').exists():
                         raise InterruptedError('STOP requested')
+                    if parallel:
+                        remote = parallel.consume(root, activity)
+                        if remote is not None:
+                            records, seconds, operations = remote
+                            mean_elapsed = max(0, seconds) / max(1, operations)
+                            for kind, path, value in records:
+                                activity('classify_entry', path)
+                                self.scan_control.record(source, kind, mean_elapsed)
+                                if kind == 'exclude':
+                                    exclude(path, value)
+                                else:
+                                    if paths and batch_bytes + value > self.config.get('chunk_bytes', 2*1024**3):
+                                        flush()
+                                    paths.append(path)
+                                    sizes.append(value)
+                                    batch_bytes += value
+                                    if len(paths) >= self.config.get('chunk_files', 1000):
+                                        flush()
+                            continue
                     try:
                         activity('list_directory', root)
                         with os.scandir(root) as iterator:
@@ -252,7 +307,13 @@ class Queue:
                                   (root == task['source'] and e.name == task.get('exclude_child')))
                     skip_before = resume_name if relative_root == resume_directory else None
                     activity('metadata_wait', root)
-                    for entry, (kind, value) in self.scan_control.entries(source, candidates, skip_before):
+                    if (parallel is self.parallel_scan and parallel is not None
+                            and len(entries) >= ENTRY_BATCH_THRESHOLD and parallel.enabled()):
+                        classified = parallel.entries(root, candidates, skip_before,
+                                                      self.scan_control, source, activity)
+                    else:
+                        classified = self.scan_control.entries(source, candidates, skip_before)
+                    for entry, (kind, value) in classified:
                         activity('classify_entry', entry.path)
                         if kind == 'directory':
                             dirs.append((entry.path, None))
@@ -321,6 +382,17 @@ class Queue:
         with self.mutex:
             if self.db.execute('SELECT state FROM scans WHERE source=?', (source,)).fetchone()[0] == 'done':
                 return
+            if self.parallel_links:
+                cursor = self.db.execute('SELECT * FROM link_cursors WHERE source=?', (source,)).fetchone()
+                legacy = self.db.execute('SELECT 1 FROM tasks WHERE source=? LIMIT 1', (source,)).fetchone()
+                if cursor is not None or legacy is None:
+                    use_parallel = True
+                else:
+                    use_parallel = False
+            else:
+                use_parallel = False
+        if use_parallel:
+            return self.scan_parallel_links(task)
         self.scan_state(source, 'scanning')
         paths, sizes = [], []
         batch_bytes = 0
@@ -375,6 +447,96 @@ class Queue:
                         if len(paths) >= self.config.get('chunk_files', 1000):
                             flush()
                 flush()
+            self.scan_state(source, 'done', f'{errors} excluded entries' if errors else '')
+            activity('done', task['source'])
+        except Exception as error:
+            self.scan_state(source, 'error', str(error))
+            activity('error', task['source'])
+
+    def scan_parallel_links(self, task):
+        """Commit ordered batches before advancing a durable ledger cursor."""
+        source = task['id']
+        self.scan_state(source, 'scanning')
+        def activity(operation, path):
+            self.scan_activity[source] = dict(operation=operation, path=str(path), updated=time.time(), resumed_after=None)
+        try:
+            ledger = Path(task['link_exclusions_file'])
+            digest = hashlib.sha256()
+            total = 0
+            with ledger.open('rb') as inp:
+                for raw in inp:
+                    digest.update(raw)
+                    total += 1
+            identity = digest.hexdigest()
+            with self.mutex, self.db:
+                batch_links = self.parallel_links.settings['batch_links']
+                self.db.execute('INSERT OR IGNORE INTO link_cursors VALUES (?,?,0,0,0,?,?)',
+                                (source, identity, total, batch_links))
+                cursor = dict(self.db.execute('SELECT * FROM link_cursors WHERE source=?', (source,)).fetchone())
+            if cursor['digest'] != identity or not 0 <= cursor['next_index'] <= total:
+                raise ValueError('directory-link ledger changed since its committed cursor')
+            errors = cursor['errors']
+            self.link_progress[source] = dict(completed_links=cursor['next_index'], total_links=total)
+            audit = self.base / ('excluded-' + source + '.jsonl')
+            if not audit.exists():
+                if cursor['audit_bytes']:
+                    raise ValueError('committed link exclusions are missing')
+                audit.touch()
+            if audit.stat().st_size < cursor['audit_bytes']:
+                raise ValueError('committed link exclusions were truncated')
+            def inputs():
+                with ledger.open() as inp:
+                    for index, line in enumerate(inp, 1):
+                        if index <= cursor['next_index']:
+                            continue
+                        item = json.loads(line)
+                        if item.get('reason') != 'directory symlink (not followed)':
+                            raise ValueError('invalid entry in immutable link ledger')
+                        path = item['path']
+                        if os.path.commonpath((os.path.abspath(path), os.path.abspath(task['source']))) != os.path.abspath(task['source']):
+                            raise ValueError('link escaped its configured source')
+                        yield index, path
+            with audit.open('r+b') as excluded:
+                excluded.truncate(cursor['audit_bytes'])
+                excluded.seek(cursor['audit_bytes'])
+                for end, links, records in self.parallel_links.batches(source, inputs(), activity,
+                                                                     batch_links=cursor['batch_links']):
+                    paths, sizes, size = [], [], 0
+                    def flush():
+                        nonlocal paths, sizes, size
+                        if not paths:
+                            return
+                        while self.pending(source) >= self.scan_control.queue_limit(self.config.get('pending_per_source', 256)):
+                            activity('queue_backpressure', paths[-1])
+                            if (self.base / 'STOP').exists():
+                                raise InterruptedError('STOP requested')
+                            time.sleep(2)
+                        self.add(source, paths, sizes, True)
+                        paths, sizes, size = [], [], 0
+                    if records is None:
+                        records = (r for link in links for r in scan_link(link, self.scan_control.scope))
+                    for kind, path, value in records:
+                        if (self.base / 'STOP').exists():
+                            raise InterruptedError('STOP requested')
+                        activity('scan_directory_link', path)
+                        if kind == 'exclude':
+                            errors += 1
+                            excluded.write((json.dumps(dict(path=path, reason=value), ensure_ascii=False) + '\n').encode())
+                            continue
+                        if paths and size + value > self.config.get('chunk_bytes', 2*1024**3):
+                            flush()
+                        paths.append(path)
+                        sizes.append(value)
+                        size += value
+                        if len(paths) >= self.config.get('chunk_files', 1000):
+                            flush()
+                    flush()
+                    excluded.flush()
+                    os.fsync(excluded.fileno())
+                    with self.mutex, self.db:
+                        self.db.execute('UPDATE link_cursors SET next_index=?,errors=?,audit_bytes=? WHERE source=?',
+                                        (end, errors, excluded.tell(), source))
+                    self.link_progress[source] = dict(completed_links=end, total_links=total)
             self.scan_state(source, 'done', f'{errors} excluded entries' if errors else '')
             activity('done', task['source'])
         except Exception as error:
@@ -497,24 +659,39 @@ class Queue:
                             and s['source'] in self.scan_activity
                             and self.scan_activity[s['source']]['operation'] != 'queue_backpressure'
                             and now-self.scan_activity[s['source']]['updated'] > self.config.get('scan_stall_seconds', 180)]
+        pressure = cgroup_metrics()
         self.scan_control.observe(
             {name: sum(g['chunks'] for g in groups if g['source']==name and g['state']=='pending')
              for name in self.sources},
-            cgroup_metrics(),
+            pressure,
             {name: sum(g['files'] for g in groups if g['source']==name and g['state']=='done')
              for name in self.sources})
+        completed_files = sum(r['files'] for r in groups if r['state']=='done')
+        if self.parallel_scan:
+            self.parallel_scan.observe(nodes, completed_files, now, scanning, pressure)
+        if self.parallel_links:
+            self.parallel_links.observe(nodes, pressure, now)
+        if self.parallel_yuanhai_scan:
+            prepared_scanning = any(s['source'] == self.config.get('parallel_scan_source')
+                                    and s['state'] not in ('done', 'error') for s in scans)
+            self.parallel_yuanhai_scan.observe(nodes, completed_files, now, scanning, pressure,
+                                               coexist=prepared_scanning)
         recovery, recovery_age, recovery_stale = (self.recovery_monitor.get() if self.recovery_monitor
                                                    else (None, None, False))
         return dict(updated=now, state=state, scan_complete=not scanning, groups=groups, scans=scans,
                     recovery=recovery, recovery_status_age_seconds=recovery_age,
                     recovery_status_stale=recovery_stale,
                     scan_control=self.scan_control.snapshot(),
+                    parallel_scan=self.parallel_scan.snapshot() if self.parallel_scan else None,
+                    parallel_link_scan=self.parallel_links.snapshot() if self.parallel_links else None,
+                    link_scan_progress=dict(self.link_progress),
+                    parallel_yuanhai_scan=self.parallel_yuanhai_scan.snapshot() if self.parallel_yuanhai_scan else None,
                     scanner_activity=dict(self.scan_activity),
                     last_completed_at=last_completed, upload_idle_seconds=now-last_completed if last_completed else None,
                     waiting_for_scan=scanning and not unfinished, stalled_scanners=stalled_scanners,
                     nodes=nodes, active=active, leased_chunks=leased_chunks, completed_by_node=completed, counters=counters,
                     discovered_files=sum(r['files'] for r in groups), discovered_bytes=sum(r['bytes'] for r in groups),
-                    completed_files=sum(r['files'] for r in groups if r['state']=='done'),
+                    completed_files=completed_files,
                     completed_bytes=sum(r['bytes'] for r in groups if r['state']=='done'))
 
 

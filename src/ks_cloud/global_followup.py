@@ -25,7 +25,8 @@ def prepare_full_round(config, number, port):
                           for task in config['tasks']]
         child.update(run_dir=str(final), port=port, update_rule=1,
                      local_root='/var/tmp/ks-cloud/' + final.name,
-                     presence_followup_enabled=True, global_followup_enabled=False)
+                     presence_followup_enabled=True, global_followup_enabled=False,
+                     scan_autotune_enabled=False)
         child['queue_db'] = child['local_root'] + '/queue.sqlite'
         child['endpoint'] = config['endpoint'].rsplit(':', 1)[0] + ':' + str(port)
         child['coordinator_endpoints'] = {host: url.rsplit(':', 1)[0] + ':' + str(port)

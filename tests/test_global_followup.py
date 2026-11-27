@@ -33,6 +33,8 @@ class GlobalFollowupTests(unittest.TestCase):
         return data
 
     def test_positive_full_and_link_rounds_trigger_another_global_round(self):
+        self.config.update(parallel_scan_base='/one/shards', parallel_scan_source='one',
+                           parallel_scan_tuning_file='/one/tuning.json', parallel_yuanhai_scan_base='/two/tasks')
         self.status(self.root, self.tasks, 3, 5)
         (self.root / 'followup-state.json').write_text(json.dumps(dict(phase='finished', round=2)))
         for n, succeeded in [(1, 2), (2, 0)]:
@@ -51,8 +53,12 @@ class GlobalFollowupTests(unittest.TestCase):
         child = json.loads((second / 'config.json').read_text())
         self.assertEqual(child['tasks'], self.tasks)
         self.assertEqual(child['scope_allowed_roots'], self.config['scope_allowed_roots'])
+        self.assertEqual(child['parallel_scan_base'], '/one/shards')
+        self.assertEqual(child['parallel_scan_tuning_file'], '/one/tuning.json')
+        self.assertEqual(child['parallel_yuanhai_scan_base'], '/two/tasks')
         self.assertTrue(child['presence_followup_enabled'])
         self.assertFalse(child['global_followup_enabled'])
+        self.assertFalse(child['scan_autotune_enabled'])
         self.status(second, self.tasks, 0, 10)
         (second / 'followup-state.json').write_text(json.dumps(dict(phase='finished', rounds=0)))
         state = tick(self.config)
