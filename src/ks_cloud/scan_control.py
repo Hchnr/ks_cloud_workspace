@@ -7,6 +7,8 @@ import stat
 import threading
 import time
 
+from .scope import OUTSIDE, UploadScope
+
 
 DEFAULTS = dict(enabled=False, auto=True, workers=2, max_workers=8,
                 prefetch_entries=16, queue_high_chunks=64, control_interval_seconds=60,
@@ -41,6 +43,7 @@ def validate_settings(value):
 class ScanControl:
     def __init__(self, config, clock=time.monotonic):
         self.config = config
+        self.scope = UploadScope(config['scope_allowed_roots']) if 'scope_allowed_roots' in config else None
         self.clock = clock
         self.lock = threading.RLock()
         self.settings = dict(DEFAULTS)
@@ -201,6 +204,7 @@ class ScanControl:
             try:
                 if entry.is_dir(follow_symlinks=False):result=('directory',None)
                 elif skip_before is not None and entry.name<=skip_before:result=('skip',None)
+                elif entry.is_symlink() and self.scope and not self.scope.allows(entry.path):result=('exclude',OUTSIDE)
                 elif entry.is_symlink() and entry.is_dir():result=('exclude','directory symlink (not followed)')
                 else:
                     info=entry.stat()

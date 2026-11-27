@@ -69,6 +69,15 @@ class DeletePlanTests(unittest.TestCase):
             prepare(self.primary, self.release, 18800)
         self.assertFalse((self.base / 'primary_delete').exists())
 
+    def test_scoped_verification_requires_a_separately_validated_delete_plan(self):
+        path = self.primary / 'config.json'
+        config = json.loads(path.read_text())
+        config['scope_allowed_roots'] = [str(self.source)]
+        path.write_text(json.dumps(config))
+        with self.assertRaisesRegex(ValueError, 'separately validated deletion plan'):
+            prepare(self.primary, self.release, 18800)
+        self.assertFalse((self.base / 'primary_delete').exists())
+
     def test_refuses_unfinished_or_missing_followup(self):
         (self.primary / 'followup-state.json').write_text(json.dumps(dict(phase='checking_links')))
         with self.assertRaisesRegex(ValueError, 'follow-up is incomplete'):

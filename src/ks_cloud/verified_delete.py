@@ -140,8 +140,9 @@ def run(config, source, task_id, manifest, expected, folder):
                                     timeout=config.get('presence_check_timeout', 21600))
         check = parse_progress(tail(log))
         check['exit_code'] = result.returncode
-        if not successful(check) or check.get('handled') != len(present):
-            raise RuntimeError('cloud path recheck failed; no files deleted')
+        if (not successful(check) or check.get('handled') != len(present)
+                or check.get('succeeded') != 0 or check.get('skipped') != len(present)):
+            raise RuntimeError('cloud path recheck did not confirm every path without uploads; no files deleted')
     validate_gate(config)
     removed, removed_bytes = 0, 0
     def unlink(entry):

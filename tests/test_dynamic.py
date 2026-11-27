@@ -44,6 +44,128 @@ class DynamicTests(unittest.TestCase):
         command = upload_command(task['config'], task['manifest'], self.base / 'worker')
         self.assertEqual(command[command.index('--update-rule') + 1], '1')
 
+    def test_scanner_excludes_external_links_and_marks_scoped_manifest(self):
+        from ks_cloud.scope import OUTSIDE
+        other, external = self.base / 'other', self.base / 'external'
+        other.mkdir()
+        external.mkdir()
+        (self.src / 'normal').write_text('ok')
+        (other / 'allowed').write_text('allowed')
+        (external / 'secret').write_text('secret')
+        (self.src / 'inner-link').symlink_to(other / 'allowed')
+        (self.src / 'outer-link').symlink_to(external / 'secret')
+        (self.src / 'outer-directory').symlink_to(external, target_is_directory=True)
+        config = dict(self.config, run_dir=str(self.base / 'scoped-run'),
+                      scope_allowed_roots=[str(self.src), str(other)])
+        queue = Queue(config)
+        try:
+            queue.scan(config['tasks'][0])
+            rows = queue.db.execute('SELECT manifest,scope_checked FROM tasks').fetchall()
+            paths = [line for row in rows for line in Path(row['manifest']).read_text().splitlines()]
+            self.assertEqual(set(paths), {str(self.src / 'normal'), str(self.src / 'inner-link')})
+            self.assertTrue(all(row['scope_checked'] == 1 for row in rows))
+            audit = [json.loads(line) for line in (Path(config['run_dir']) / 'excluded-dataset.jsonl').read_text().splitlines()]
+            self.assertEqual({item['path'] for item in audit if item['reason'] == OUTSIDE},
+                             {str(self.src / 'outer-link'), str(self.src / 'outer-directory')})
+        finally:
+            queue.db.close()
+
+    def test_exclusions_are_durable_before_restart_cursor_advances(self):
+        from ks_cloud.scope import OUTSIDE
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (outside / 'secret').write_text('secret')
+        (self.src / 'a-external').symlink_to(outside / 'secret')
+        (self.src / 'b-normal').write_text('ok')
+        config = dict(self.config, run_dir=str(self.base / 'audit-run'), chunk_files=1,
+                      scope_allowed_roots=[str(self.src)])
+        queue = Queue(config)
+        original_add = queue.add
+        observed = []
+        def check_before_commit(*args):
+            audit = Path(config['run_dir']) / 'excluded-dataset.jsonl'
+            observed.extend(json.loads(line) for line in audit.read_text().splitlines())
+            return original_add(*args)
+        try:
+            queue.add = check_before_commit
+            queue.scan(config['tasks'][0])
+            self.assertEqual(queue.db.execute('SELECT state FROM scans').fetchone()[0], 'done')
+            self.assertEqual([row['reason'] for row in observed], [OUTSIDE])
+        finally:
+            queue.db.close()
+
+    def test_scope_exclusions_are_not_counted_as_verified_progress(self):
+        self.q.add('dataset', ['/source/one', '/source/two'], [3, 7])
+        task = self.claim()
+        self.finish(task, exit_code=0, failed=0, succeeded=0, skipped=1, handled=2,
+                    scope_excluded_files=1, scope_excluded_bytes=7)
+        status = self.q.snapshot()
+        self.assertEqual((status['completed_files'], status['discovered_files'], status['completed_bytes']), (1, 1, 3))
+        self.assertEqual((status['counters']['scope_excluded_files'], status['counters']['scope_excluded_bytes']), (1, 7))
+
+    def test_worker_filters_a_legacy_manifest_before_upload(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (self.src / 'allowed').write_text('allowed')
+        (outside / 'secret').write_text('secret')
+        (self.src / 'external').symlink_to(outside / 'secret')
+        received = self.base / 'received'
+        fake = self.base / 'scope-fake-ks3util'
+        fake.write_text('#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\n'
+                        f'p=Path({str(received)!r})\n'
+                        'files=Path(sys.argv[sys.argv.index("--object-file")+1]).read_text().splitlines()\n'
+                        'p.write_text("\\n".join(files))\n'
+                        'print(f"Succeed count: {len(files)} Skip count: 0 Failed count: 0")\n')
+        fake.chmod(0o755)
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        config = dict(self.config, run_dir=str(self.base / 'legacy-run'), hosts=['a'], tool=str(fake),
+                      local_root=str(self.base / 'legacy-local'), endpoint=f'http://127.0.0.1:{port}', port=port,
+                      scope_allowed_roots=[str(self.src)], minimum_worker_protocol=4, slots=1,
+                      heartbeat_seconds=0.1, coordinator_publish_seconds=0.1, worker_disconnect_seconds=5)
+        queue = Queue(config)
+        queue.add('dataset', [str(self.src / 'allowed'), str(self.src / 'external')], [7, 6])
+        queue.scan_state('dataset', 'done')
+        (queue.base / 'token').write_text('test-token')
+        queue.db.close()
+        config_path = self.base / 'legacy-config.json'
+        config_path.write_text(json.dumps(config))
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / 'src'))
+        coordinator = subprocess.Popen([sys.executable, '-m', 'ks_cloud.dynamic', 'coordinator',
+                                        '--config', str(config_path)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        worker = None
+        try:
+            deadline = time.monotonic() + 15
+            status_path = Path(config['run_dir']) / 'status.json'
+            while not status_path.exists() and coordinator.poll() is None and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.assertIsNone(coordinator.poll())
+            worker = subprocess.Popen([sys.executable, '-m', 'ks_cloud.dynamic', 'worker', '--config',
+                                       str(config_path), '--host', 'a'], env=env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            status = {}
+            while time.monotonic() < deadline:
+                status = json.loads(status_path.read_text())
+                if status['state'].startswith('finished'):
+                    break
+                time.sleep(.1)
+            self.assertEqual(status.get('state'), 'finished')
+            self.assertEqual(received.read_text().splitlines(), [str(self.src / 'allowed')])
+            self.assertEqual(status['completed_files'], 1)
+            self.assertEqual(status['counters']['scope_excluded_files'], 1)
+        finally:
+            for proc in (worker, coordinator):
+                if proc and proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                if proc and proc.stderr:
+                    proc.stderr.close()
+
     def test_delete_queue_imports_only_completed_verified_tasks(self):
         import sqlite3
         verified = self.base / 'verified.sqlite'

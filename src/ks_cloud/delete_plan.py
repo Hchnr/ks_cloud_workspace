@@ -122,6 +122,8 @@ def prepare(primary, release, port):
     """Create a fully unarmed run; never starts workers or creates a delete gate."""
     primary, release = Path(primary).resolve(), Path(release).resolve()
     config = json.loads((primary / 'config.json').read_text())
+    if config.get('scope_allowed_roots'):
+        raise ValueError('scoped verification requires a separately validated deletion plan')
     if config.get('update_rule') != 1 or not 1024 <= port <= 65535:
         raise ValueError('expected presence-only verification and valid port')
     mapping = [{key: task.get(key) for key in ('id', 'source', 'destination', 'exclude_child')} for task in config['tasks']]

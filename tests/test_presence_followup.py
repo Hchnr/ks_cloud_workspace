@@ -34,9 +34,15 @@ class PresenceFollowupTests(unittest.TestCase):
         self.assertEqual(snapshot_link_inputs(self.config), {'one': 1, 'two': 0})
 
     def test_new_round_keeps_mapping_and_presence_only_rule(self):
+        self.config.update(parallel_scan_base='/one/shards', parallel_scan_source='one',
+                           parallel_scan_tuning_file='/one/tuning.json', parallel_yuanhai_scan_base='/two/tasks')
         run = prepare_round(self.config, {'one': 1, 'two': 0}, 1, 18807)
         child = json.loads((run / 'config.json').read_text())
+        self.assertFalse(any(key.startswith(('parallel_scan_', 'parallel_yuanhai_')) for key in child))
         self.assertEqual(child['update_rule'], 1)
+        self.assertFalse(child['presence_followup_enabled'])
+        self.assertFalse(child['global_followup_enabled'])
+        self.assertFalse(child['scan_autotune_enabled'])
         self.assertEqual(child['port'], 18807)
         self.assertEqual(child['tasks'][0]['destination'], 'ks3://b/one/')
         self.assertEqual(len(child['tasks']), 1)

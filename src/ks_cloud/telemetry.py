@@ -31,6 +31,27 @@ def scan_metrics(snapshot):
     for source, values in control['sources'].items():
         for key in ['workers','files_s','upload_files_s','metadata_ms','operations','errors','fallbacks','cooldown_seconds']:
             result['scanning/'+source+'/'+key] = values[key]
+    for field, prefix in [('parallel_scan', 'scan_fleet'), ('parallel_yuanhai_scan', 'scan_fleet_yuanhai')]:
+        parallel = snapshot.get(field)
+        if not parallel:
+            continue
+        for key in ['enabled', 'max_nodes', 'active_nodes', 'queued', 'buffered', 'fallbacks', 'cooldown_seconds']:
+            result[prefix+'/'+key] = float(parallel[key])
+        result[prefix+'/resuming_entries'] = float(parallel.get('resuming_entries', 0))
+        for host, values in parallel['nodes'].items():
+            for key in ['healthy', 'active', 'files', 'subtrees', 'errors']:
+                result[prefix+'/'+host+'/'+key] = float(values[key])
+    links = snapshot.get('parallel_link_scan')
+    if links:
+        for key in ('enabled', 'max_nodes', 'effective_nodes', 'active_nodes', 'queued', 'fallbacks'):
+            result['link_scan_fleet/'+key] = float(links[key])
+        for host, values in links['nodes'].items():
+            for key in ('healthy', 'active', 'files', 'batches', 'errors'):
+                result['link_scan_fleet/'+host+'/'+key] = float(values[key])
+    for source, progress in snapshot.get('link_scan_progress', {}).items():
+        for key in ('completed_links', 'total_links'):
+            result['link_scanning/'+source+'/'+key] = progress[key]
+        result['link_scanning/'+source+'/coverage_pct'] = 100*progress['completed_links']/max(1, progress['total_links'])
     return result
 
 
@@ -112,6 +133,8 @@ def run(config):
                    'progress/uploaded_files_confirmed': counters.get('succeeded',0),
                    'progress/uploaded_TiB_confirmed': counters.get('succeeded_bytes',0)/1024**4,
                    'progress/skipped_files': counters.get('skipped',0),
+                   'progress/scope_excluded_files': counters.get('scope_excluded_files',0),
+                   'progress/scope_excluded_GiB': counters.get('scope_excluded_bytes',0)/1024**3,
                    'cluster/healthy_nodes': sum(n['healthy'] for n in s['nodes'].values()),
                    'cluster/active_slots': len(s['active']),
                    'cluster/leased_chunks': s.get('leased_chunks',len(s['active'])),

@@ -26,6 +26,12 @@ def run(config_path, host):
     candidates = config.get('coordinator_hosts', [config['hosts'][0]])
     if host in candidates:
         commands['coordinator'] = [sys.executable,'-S','-B','-m','ks_cloud.dynamic','coordinator','--config',config_path,'--host',host]
+        if config.get('presence_followup_enabled'):
+            commands['presence_followup'] = [sys.executable,'-S','-B','-m','ks_cloud.presence_followup','--config',config_path]
+        if config.get('global_followup_enabled'):
+            commands['global_followup'] = [sys.executable,'-S','-B','-m','ks_cloud.global_followup','--config',config_path]
+        if config.get('global_followup_enabled') and config.get('scan_autotune_enabled'):
+            commands['scan_autotune'] = [sys.executable,'-S','-B','-m','ks_cloud.scan_autotune',str(shared)]
         if config.get('swanlab_enabled', True):
             telemetry = 'ks_cloud.delete_telemetry' if config.get('operation') == 'delete_verified' else 'ks_cloud.telemetry'
             commands['swanlab'] = [config['swanlab_python'],'-B','-m',telemetry,'--config',config_path]
@@ -59,6 +65,23 @@ def run(config_path, host):
                 children.pop(name)
                 child = None
             should_run = name == 'coordinator' or (not terminal and not (shared/'STOP').exists())
+            if name in ('presence_followup', 'global_followup'):
+                state_path = shared / ('followup-state.json' if name == 'presence_followup' else 'global-followup-state.json')
+                try:
+                    phase = json.loads(state_path.read_text()).get('phase', '')
+                except (OSError, ValueError):
+                    phase = ''
+                should_run = not phase.startswith('finished')
+            if name == 'scan_autotune':
+                try:
+                    phase = json.loads((shared/'global-followup-state.json').read_text()).get('phase','')
+                except (OSError, ValueError):
+                    phase = ''
+                try:
+                    marker = (shared/'monitoring'/'automatic-scan-tuning.lock').read_text().strip()
+                except OSError:
+                    marker = ''
+                should_run = not phase.startswith('finished') and not marker and not (shared/'STOP').exists()
             if ha and name == 'coordinator':
                 if leader_alive and leader.get('host') != host:
                     should_run = False
@@ -82,7 +105,8 @@ def run(config_path, host):
                     child = subprocess.Popen(guarded,stdin=subprocess.DEVNULL,stdout=out,stderr=out,start_new_session=True)
                 children[name] = child
                 restarts[name] = restarts.get(name,0)+1
-                next_start[name] = time.time()+min(1800,30*2**min(restarts[name]-1,6)) if name=='swanlab' else time.time()+30
+                next_start[name] = (time.time()+min(1800,30*2**min(restarts[name]-1,6)) if name=='swanlab'
+                                    else time.time()+config.get('service_restart_seconds',30))
             if child:
                 statuses[name] = dict(pid=child.pid,alive=child.poll() is None,starts=restarts.get(name,0))
         owner = children.get('coordinator')
